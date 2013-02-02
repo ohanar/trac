@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2012 Edgewall Software
+# Copyright (C) 2012-2013 Edgewall Software
 # Copyright (C) 2006-2011, Herbert Valerio Riedel <hvr@gnu.org>
 # All rights reserved.
 #
@@ -14,26 +14,47 @@
 
 from __future__ import with_statement
 
-from datetime import datetime
 import os
-import sys
+import posixpath
+from cStringIO import StringIO
+from datetime import datetime
+
+try:
+    import pygit2
+except ImportError:
+    pygit2 = None
+if pygit2:
+    from pygit2 import (
+        GIT_OBJ_COMMIT, GIT_OBJ_TREE, GIT_OBJ_BLOB, GIT_OBJ_TAG,
+        GIT_DELTA_ADDED, GIT_DELTA_DELETED, GIT_DELTA_MODIFIED,
+        GIT_DELTA_RENAMED, GIT_DELTA_COPIED,
+        GIT_SORT_TIME, GIT_SORT_REVERSE,
+    )
 
 from genshi.builder import tag
 
 from trac.config import BoolOption, IntOption, PathOption, Option
-from trac.core import *
-from trac.util import TracError, shorten_line
-from trac.util.datefmt import FixedOffset, to_timestamp, format_datetime
+from trac.core import Component, implements, TracError
+from trac.util import shorten_line
+from trac.util.datefmt import (
+    utc, FixedOffset, to_timestamp, format_datetime, user_time,
+)
 from trac.util.text import to_unicode
-from trac.versioncontrol.api import Changeset, Node, Repository, \
-                                    IRepositoryConnector, NoSuchChangeset, \
-                                    NoSuchNode, IRepositoryProvider
+from trac.util.translation import _, N_, tag_, gettext
+from trac.versioncontrol.api import (
+    Changeset, Node, Repository, IRepositoryConnector, NoSuchChangeset,
+    NoSuchNode, IRepositoryProvider,
+)
 from trac.versioncontrol.cache import CachedRepository, CachedChangeset
-from trac.versioncontrol.web_ui import IPropertyRenderer
+from trac.versioncontrol.web_ui import IPropertyRenderer, RenderedProperty
 from trac.web.chrome import Chrome
 from trac.wiki import IWikiSyntaxProvider
+from trac.wiki.formatter import wiki_to_oneliner
 
-from tracopt.versioncontrol.git import PyGIT
+
+__all__ = ['GitCachedRepository', 'GitCachedChangeset', 'GitConnector',
+           'GitRepository', 'GitChangeset', 'GitNode',
+           'GitwebProjectsRepositoryProvider']
 
 
 class GitCachedRepository(CachedRepository):
@@ -42,19 +63,13 @@ class GitCachedRepository(CachedRepository):
     Passes through {display,short,normalize}_rev
     """
 
-    def display_rev(self, rev):
-        return self.short_rev(rev)
+    def short_rev(self, rev):
+        return self.repos.short_rev(rev)
 
-    def short_rev(self, path):
-        return self.repos.short_rev(path)
+    display_rev = short_rev
 
     def normalize_rev(self, rev):
-        if not rev:
-            return self.repos.get_youngest_rev()
-        normrev = self.repos.git.verifyrev(rev)
-        if normrev is None:
-            raise NoSuchChangeset(rev)
-        return normrev
+        return self.repos.normalize_rev(rev)
 
     def get_changeset(self, rev):
         return GitCachedChangeset(self, self.normalize_rev(rev), self.env)
@@ -63,23 +78,14 @@ class GitCachedRepository(CachedRepository):
 class GitCachedChangeset(CachedChangeset):
     """Git-specific cached changeset.
 
-    Handles get_branches()
+    Handles get_branches() and get_tags()
     """
     def get_branches(self):
-        _rev = self.rev
+        return self.repos.repos.get_changeset(self.rev).get_branches()
 
-        return [(k, v == _rev) for k, v in
-                 self.repos.repos.git.get_branch_contains(_rev, resolve=True)]
+    def get_tags(self):
+        return self.repos.repos.get_changeset(self.rev).get_tags()
 
-
-def _last_iterable(iterable):
-    """helper for detecting last iteration in for-loop"""
-    i = iter(iterable)
-    v = i.next()
-    for nextv in i:
-        yield False, v
-        v = nextv
-    yield True, v
 
 def intersperse(sep, iterable):
     """The 'intersperse' generator takes an element and an iterable and
@@ -92,38 +98,59 @@ def intersperse(sep, iterable):
         if i: yield sep
         yield item
 
-# helper
-def _parse_user_time(s):
-    """Parse author or committer attribute lines and return
-    corresponding ``(user, timestamp)`` pair.
-    """
 
-    user, time, tz_str = s.rsplit(None, 2)
-    tz = FixedOffset((int(tz_str) * 6) / 10, tz_str)
-    time = datetime.fromtimestamp(float(time), tz)
-    return user, time
+def _git_timestamp(ts, offset):
+    if offset == 0:
+        tz = utc
+    else:
+        hours, rem = divmod(abs(offset), 60)
+        tzname = 'UTC%+03d:%02d' % (-hours if offset < 0 else hours, rem)
+        tz = FixedOffset(offset, tzname)
+    return datetime.fromtimestamp(ts, tz)
+
+
+def _format_signature(signature):
+    name = signature.name.strip()
+    email = signature.email.strip()
+    return ('%s <%s>' % (name, email)).strip()
+
+
+class _cached_walker(object):
+
+    __slots__ = ['walker', 'revs', 'commits']
+
+    def __init__(self, walker):
+        self.walker = walker
+        self.revs = set()
+        self.commits = []
+
+    def __contains__(self, rev):
+        if rev in self.revs:
+            return True
+        add_rev = self.revs.add
+        add_commit = self.commits.append
+        for commit in self.walker:
+            old_rev = commit.hex
+            add_commit(commit)
+            add_rev(old_rev)
+            if old_rev == rev:
+                return True
+        return False
+
+    def reverse(self, start_rev):
+        if start_rev not in self:
+            return
+        match = False
+        for commit in reversed(self.commits):
+            if not match and commit.hex == start_rev:
+                match = True
+            if match:
+                yield commit
 
 
 class GitConnector(Component):
 
     implements(IRepositoryConnector, IWikiSyntaxProvider)
-
-    def __init__(self):
-        self._version = None
-
-        try:
-            self._version = PyGIT.Storage.git_version(git_bin=self.git_bin)
-        except PyGIT.GitError, e:
-            self.log.error("GitError: " + str(e))
-
-        if self._version:
-            self.log.info("detected GIT version %s" % self._version['v_str'])
-            self.env.systeminfo.append(('GIT', self._version['v_str']))
-            if not self._version['v_compatible']:
-                self.log.error("GIT version %s installed not compatible"
-                               "(need >= %s)" %
-                               (self._version['v_str'],
-                                self._version['v_min_str']))
 
     # IWikiSyntaxProvider methods
 
@@ -166,9 +193,6 @@ class GitConnector(Component):
 
     # IRepositoryConnector methods
 
-    persistent_cache = BoolOption('git', 'persistent_cache', 'false',
-        """Enable persistent caching of commit tree.""")
-
     cached_repository = BoolOption('git', 'cached_repository', 'false',
         """Wrap `GitRepository` in `CachedRepository`.""")
 
@@ -199,425 +223,638 @@ class GitConnector(Component):
     git_fs_encoding = Option('git', 'git_fs_encoding', 'utf-8',
         """Define charset encoding of paths within git repositories.""")
 
-    git_bin = Option('git', 'git_bin', 'git',
-        """Path to the git executable.""")
-
 
     def get_supported_types(self):
-        yield ('git', 8)
+        if pygit2:
+            yield ('git', 8)
 
     def get_repository(self, type, dir, params):
         """GitRepository factory method"""
         assert type == 'git'
 
         if not (4 <= self.shortrev_len <= 40):
-            raise TracError("[git] shortrev_len setting must be within [4..40]")
+            raise TracError(_("[git] shortrev_len setting must be within "
+                              "[4..40]"))
 
         if not (4 <= self.wiki_shortrev_len <= 40):
-            raise TracError("[git] wikishortrev_len must be within [4..40]")
+            raise TracError(_("[git] wikishortrev_len must be within [4..40]"))
 
-        if not self._version:
-            raise TracError("GIT backend not available")
-        elif not self._version['v_compatible']:
-            raise TracError("GIT version %s installed not compatible"
-                            "(need >= %s)" %
-                            (self._version['v_str'],
-                             self._version['v_min_str']))
-
-        if self.trac_user_rlookup:
-            def rlookup_uid(email):
-                """Reverse map 'real name <user@domain.tld>' addresses to trac
-                user ids.
-
-                :return: `None` if lookup failed
-                """
-
-                try:
-                    _, email = email.rsplit('<', 1)
-                    email, _ = email.split('>', 1)
-                    email = email.lower()
-                except Exception:
-                    return None
-
-                for _uid, _name, _email in self.env.get_known_users():
-                    try:
-                        if email == _email.lower():
-                            return _uid
-                    except Exception:
-                        continue
-
-        else:
-            def rlookup_uid(_):
-                return None
+        format_signature = self._format_signature_by_email \
+                           if self.trac_user_rlookup else None
 
         repos = GitRepository(dir, params, self.log,
-                              persistent_cache=self.persistent_cache,
-                              git_bin=self.git_bin,
                               git_fs_encoding=self.git_fs_encoding,
                               shortrev_len=self.shortrev_len,
-                              rlookup_uid=rlookup_uid,
+                              format_signature=format_signature,
                               use_committer_id=self.use_committer_id,
-                              use_committer_time=self.use_committer_time,
-                              )
+                              use_committer_time=self.use_committer_time)
 
         if self.cached_repository:
             repos = GitCachedRepository(self.env, repos, self.log)
-            self.log.debug("enabled CachedRepository for '%s'" % dir)
+            self.log.debug("enabled CachedRepository for '%s'", dir)
         else:
-            self.log.debug("disabled CachedRepository for '%s'" % dir)
+            self.log.debug("disabled CachedRepository for '%s'", dir)
 
         return repos
+
+    def _format_signature_by_email(self, signature):
+        """Reverse map 'real name <user@domain.tld>' addresses to trac
+        user ids.
+        """
+        email = (signature.email or '').strip()
+        if email:
+            email = email.lower()
+            for username, name, _email in self.env.get_known_users():
+                if email == _email.lower():
+                    return username
+        return _format_signature(signature)
 
 
 class CsetPropertyRenderer(Component):
 
     implements(IPropertyRenderer)
 
+    git_properties = (
+        N_("Parents:"), N_("Children:"), N_("Branches:"), N_("Tags:"),
+    )
+
     # relied upon by GitChangeset
     def match_property(self, name, mode):
-        # default renderer has priority 1
-        return (name in ('Parents',
-                         'Children',
-                         'Branches',
-                         'git-committer',
-                         'git-author',
-                         ) and mode == 'revprop') and 4 or 0
+        if (mode == 'revprop' and
+            name.startswith('git-') and
+            name[4:] in ('Parents', 'Children', 'Branches', 'Tags',
+                         'committer', 'author')):
+            return 4
+        return 0
 
     def render_property(self, name, mode, context, props):
+        if name.startswith('git-'):
+            label = name[4:] + ':'
+            if label in self.git_properties:
+                label = gettext(label)
+        else:
+            label = name
+        return RenderedProperty(
+                name=label, name_attributes=[('class', 'property')],
+                content=self._render_property(name, props[name], context))
 
-        def sha_link(sha, label=None):
-            # sha is assumed to be a non-abbreviated 40-chars sha id
-            try:
-                reponame = context.resource.parent.id
-                repos = self.env.get_repository(reponame)
-                cset = repos.get_changeset(sha)
-                if label is None:
-                    label = repos.display_rev(sha)
+    def _render_property(self, name, value, context):
+        if name == 'git-Branches':
+            return self._render_branches(context, value)
 
-                return tag.a(label, class_='changeset',
-                             title=shorten_line(cset.message),
-                             href=context.href.changeset(sha, repos.reponame))
+        if name == 'git-Tags':
+            return self._render_tags(context, value)
 
-            except Exception, e:
-                return tag.a(sha, class_='missing changeset',
-                             title=to_unicode(e), rel='nofollow')
+        if name == 'git-Parents' and len(value) > 1:
+            return self._render_merge_commit(context, value)
 
-        if name == 'Branches':
-            branches = props[name]
+        if name in ('git-Parents', 'git-Children'):
+            return self._render_revs(context, value)
 
-            # simple non-merge commit
-            return tag(*intersperse(', ', (sha_link(rev, label)
-                                           for label, rev in branches)))
-
-        elif name in ('Parents', 'Children'):
-            revs = props[name] # list of commit ids
-
-            if name == 'Parents' and len(revs) > 1:
-                # we got a merge...
-                current_sha = context.resource.id
-                reponame = context.resource.parent.id
-
-                parent_links = intersperse(', ', \
-                    ((sha_link(rev),
-                      ' (',
-                      tag.a('diff',
-                            title="Diff against this parent (show the " \
-                                  "changes merged from the other parents)",
-                            href=context.href.changeset(current_sha, reponame,
-                                                        old=rev)),
-                      ')')
-                     for rev in revs))
-
-                return tag(list(parent_links),
-                           tag.br(),
-                           tag.span(tag("Note: this is a ",
-                                        tag.strong("merge"), " changeset, "
-                                        "the changes displayed below "
-                                        "correspond to the merge itself."),
-                                    class_='hint'),
-                           tag.br(),
-                           tag.span(tag("Use the ", tag.tt("(diff)"),
-                                        " links above to see all the changes "
-                                        "relative to each parent."),
-                                    class_='hint'))
-
-            # simple non-merge commit
-            return tag(*intersperse(', ', map(sha_link, revs)))
-
-        elif name in ('git-committer', 'git-author'):
-            user_, time_ = props[name]
-            _str = "%s (%s)" % (
-                Chrome(self.env).format_author(context.req, user_),
-                format_datetime(time_, tzinfo=context.req.tz))
-            return unicode(_str)
+        if name in ('git-committer', 'git-author'):
+            return self._render_signature(context, value)
 
         raise TracError("Internal error")
+
+    def _render_branches(self, context, branches):
+        links = [self._changeset_link(context, rev, name)
+                 for name, rev in branches]
+        return tag(*intersperse(', ', links))
+
+    def _render_tags(self, context, names):
+        rev = context.resource.id
+        links = [self._changeset_link(context, rev, name) for name in names]
+        return tag(*intersperse(', ', links))
+
+    def _render_revs(self, context, revs):
+        links = [self._changeset_link(context, rev) for rev in revs]
+        return tag(*intersperse(', ', links))
+
+    def _render_merge_commit(self, context, revs):
+        # we got a merge...
+        curr_rev = context.resource.id
+        reponame = context.resource.parent.id
+        href = context.href
+
+        def parent_diff(rev):
+            rev = self._changeset_link(context, rev)
+            diff = tag.a(_("diff"),
+                         href=href.changeset(curr_rev, reponame, old=rev),
+                         title=_("Diff against this parent (show the changes "
+                                 "merged from the other parents)"))
+            return tag_("%(rev)s (%(diff)s)", rev=rev, diff=diff)
+
+        links = intersperse(', ', map(parent_diff, revs))
+        hint = wiki_to_oneliner(
+            _("'''Note''': this is a '''merge''' changeset, the changes "
+              "displayed below correspond to the merge itself. Use the "
+              "`(diff)` links above to see all the changes relative to each "
+              "parent."),
+            self.env)
+        return tag(list(links), tag.br(), tag.span(hint, class_='hint'))
+
+    def _render_signature(self, context, signature):
+        req = context.req
+        dt = _git_timestamp(signature.time, signature.offset)
+        chrome = Chrome(self.env)
+        return u'%s (%s)' % (chrome.format_author(req, signature.name),
+                             user_time(req, format_datetime, dt))
+
+    def _changeset_link(self, context, rev, label=None):
+        # `rev` is assumed to be a non-abbreviated 40-chars sha id
+        reponame = context.resource.parent.id
+        repos = self.env.get_repository(reponame)
+        try:
+            cset = repos.get_changeset(rev)
+        except (NoSuchChangeset, NoSuchNode), e:
+            return tag.a(rev, class_='missing changeset', title=to_unicode(e),
+                         rel='nofollow')
+        if label is None:
+            label = repos.display_rev(rev)
+        return tag.a(label, class_='changeset',
+                     title=shorten_line(cset.message),
+                     href=context.href.changeset(rev, repos.reponame))
+
 
 
 class GitRepository(Repository):
     """Git repository"""
 
-    def __init__(self, path, params, log,
-                 persistent_cache=False,
-                 git_bin='git',
-                 git_fs_encoding='utf-8',
-                 shortrev_len=7,
-                 rlookup_uid=lambda _: None,
-                 use_committer_id=False,
-                 use_committer_time=False,
-                 ):
-
-        self.logger = log
-        self.gitrepo = path
-        self.params = params
-        self.shortrev_len = max(4, min(shortrev_len, 40))
-        self.rlookup_uid = rlookup_uid
-        self.use_committer_time = use_committer_time
-        self.use_committer_id = use_committer_id
+    def __init__(self, path, params, log, git_fs_encoding='utf-8',
+                 shortrev_len=7, format_signature=None, use_committer_id=False,
+                 use_committer_time=False):
 
         try:
-            self.git = PyGIT.StorageFactory(path, log, not persistent_cache,
-                                            git_bin=git_bin,
-                                            git_fs_encoding=git_fs_encoding) \
-                            .getInstance()
-        except PyGIT.GitError, e:
-            raise TracError("%s does not appear to be a Git "
-                            "repository." % path)
+            self.git_repos = pygit2.Repository(path)
+        except:
+            log.warn('Not git repository: %r', path, exc_info=True)
+            raise TracError(_("%(path)s does not appear to be a Git "
+                              "repository.", path=path))
 
-        Repository.__init__(self, 'git:'+path, self.params, log)
+        self.path = path
+        self.params = params
+        self.git_fs_encoding = git_fs_encoding
+        self.shortrev_len = max(4, min(shortrev_len, 40))
+        self.format_signature = format_signature or _format_signature
+        self.use_committer_id = use_committer_id
+        self.use_committer_time = use_committer_time
+        self._ref_walkers = None
+        Repository.__init__(self, 'git:' + path, self.params, log)
+
+    def _from_fspath(self, name):
+        return name.decode(self.git_fs_encoding)
+
+    def _to_fspath(self, name):
+        return name.encode(self.git_fs_encoding)
+
+    def _get_commit_username(self, commit):
+        signature = commit.committer or commit.author \
+                    if self.use_committer_id \
+                    else commit.author or commit.committer
+        return self.format_signature(signature)
+
+    def _get_commit_time(self, commit):
+        signature = commit.committer or commit.author \
+                    if self.use_committer_time \
+                    else commit.author or commit.committer
+        return _git_timestamp(signature.time, signature.offset)
+
+    def _get_tree_entry(self, tree, path):
+        if not path:
+            return None
+        if isinstance(path, unicode):
+            path = self._to_fspath(path)
+        entry = tree
+        for name in path.split('/'):
+            if name not in tree:
+                return None
+            entry = tree[name]
+            tree = entry.to_object()
+        return entry
+
+    def _get_tree(self, tree, path):
+        if not path:
+            return tree
+        entry = self._get_tree_entry(tree, path)
+        return entry.to_object() if entry else None
+
+    def _get_commit(self, rev, raises=True):
+        if not rev:
+            return self.git_repos.head
+        try:
+            git_object = self.git_repos[rev]
+            if git_object.type == GIT_OBJ_COMMIT:
+                return git_object
+        except (KeyError, ValueError):
+            pass
+        if raises:
+            raise NoSuchChangeset(rev)
+
+    def _get_ref_walkers(self):
+        walkers = self._ref_walkers
+        if walkers is not None:
+            return walkers
+
+        git_repos = self.git_repos
+        walkers = {}
+        for name in git_repos.listall_references():
+            if not name.startswith('refs/heads/'):
+                continue
+            ref = git_repos.lookup_reference(name)
+            try:
+                commit = git_repos[ref.oid]
+            except KeyError:
+                continue
+            if commit.type != GIT_OBJ_COMMIT:
+                continue
+            walkers[name] = _cached_walker(git_repos.walk(commit.oid,
+                                                          GIT_SORT_TIME))
+        self._ref_walkers = walkers
+        return walkers
+
+    def _iter_ref_walkers(self, rev):
+        git_repos = self.git_repos
+        target = git_repos[rev]
+
+        walkers = self._get_ref_walkers()
+        for name in git_repos.listall_references():
+            if not name.startswith('refs/heads/'):
+                continue
+            walker = walkers.get(name)
+            if walker is None:
+                continue
+            ref = git_repos.lookup_reference(name)
+            commit = git_repos[ref.oid]
+            if commit.commit_time < target.commit_time:
+                continue
+            yield self._from_fspath(name), ref, walker
+
+    def _get_branches(self, rev):
+        return sorted((name[11:], ref.hex)
+                      for name, ref, walker in self._iter_ref_walkers(rev)
+                      if rev in walker)
 
     def close(self):
-        self.git = None
+        self.clear()
+        self.git_repos = None
 
     def get_youngest_rev(self):
-        return self.git.youngest_rev()
+        return self.git_repos.head.hex
 
     def get_oldest_rev(self):
-        return self.git.oldest_rev()
+        sort = GIT_SORT_TIME | GIT_SORT_REVERSE
+        for commit in self.git_repos.walk(self.git_repos.head.oid, sort):
+            return commit.hex
 
     def normalize_path(self, path):
-        return path and path.strip('/') or '/'
+        if isinstance(path, str):
+            path = self._from_fspath(path)
+        return path.strip('/') if path else ''
 
     def normalize_rev(self, rev):
         if not rev:
             return self.get_youngest_rev()
-        normrev = self.git.verifyrev(rev)
-        if normrev is None:
-            raise NoSuchChangeset(rev)
-        return normrev
+        if isinstance(rev, str):
+            rev = unicode(rev, 'ascii')
 
-    def display_rev(self, rev):
-        return self.short_rev(rev)
+        commit = self._get_commit(rev, raises=False)
+        if commit:
+            return commit.hex
+
+        for name in self.git_repos.listall_references():
+            ref = self.git_repos.lookup_reference(name)
+            name = self._from_fspath(name)
+            if name.startswith('refs/heads/') and name[11:] == rev:
+                return self._get_commit(ref.oid).hex
+            if name.startswith('refs/tags/') and name[10:] == rev:
+                git_object = self.git_repos[ref.oid]
+                if git_object.type == GIT_OBJ_TAG:
+                    git_object = self.git_repos[git_object.target]
+                return git_object.hex
+
+        raise NoSuchChangeset(rev)
 
     def short_rev(self, rev):
-        return self.git.shortrev(self.normalize_rev(rev),
-                                 min_len=self.shortrev_len)
+        rev = self.normalize_rev(rev)
+        git_repos = self.git_repos
+        for size in xrange(self.shortrev_len, 40):
+            short_rev = rev[:size]
+            try:
+                git_object = git_repos[short_rev]
+                if git_object.type == GIT_OBJ_COMMIT:
+                    return short_rev
+            except KeyError:
+                pass
+        assert size == 40
 
-    def get_node(self, path, rev=None, historian=None):
-        return GitNode(self, path, rev, self.log, None, historian)
+    display_rev = short_rev
+
+    def get_node(self, path, rev=None):
+        rev = self.normalize_rev(rev)
+        path = self.normalize_path(path)
+        return GitNode(self, path, rev)
 
     def get_quickjump_entries(self, rev):
-        for bname, bsha in self.git.get_branches():
-            yield 'branches', bname, '/', bsha
-        for t in self.git.get_tags():
-            yield 'tags', t, '/', t
+        git_repos = self.git_repos
+        refs = sorted(
+            (self._from_fspath(name), git_repos.lookup_reference(name))
+            for name in git_repos.listall_references()
+            if name.startswith(('refs/heads/', 'refs/tags/')))
+
+        for name, ref in refs:
+            if name.startswith('refs/heads/'):
+                yield 'branches', name[11:], '/', ref.hex
+
+        for name, ref in refs:
+            if name.startswith('refs/tags/'):
+                git_object = git_repos[ref.oid]
+                if git_object.type == GIT_OBJ_TAG:
+                    git_object = git_repos[git_object.target]
+                yield 'tags', name[10:], '/', git_object.hex
 
     def get_path_url(self, path, rev):
         return self.params.get('url')
 
     def get_changesets(self, start, stop):
-        for rev in self.git.history_timerange(to_timestamp(start),
-                                              to_timestamp(stop)):
-            yield self.get_changeset(rev)
+        def iter_commits():
+            ts_start = to_timestamp(start)
+            ts_stop = to_timestamp(stop)
+            git_repos = self.git_repos
+            for name in git_repos.listall_references():
+                if not name.startswith('refs/heads/'):
+                    continue
+                ref = git_repos.lookup_reference(name)
+                for commit in git_repos.walk(ref.oid, GIT_SORT_TIME):
+                    ts = commit.commit_time
+                    if ts < ts_start:
+                        break
+                    if ts_start <= ts <= ts_stop:
+                        yield ts, commit
+
+        for ts, commit in sorted(iter_commits(), key=lambda v: v[0]):
+            yield GitChangeset(self, commit)
 
     def get_changeset(self, rev):
-        """GitChangeset factory method"""
         return GitChangeset(self, rev)
+
+    _DELTA_STATUS_MAP = {
+        GIT_DELTA_ADDED:    Changeset.ADD,
+        GIT_DELTA_DELETED:  Changeset.DELETE,
+        GIT_DELTA_MODIFIED: Changeset.EDIT,
+        GIT_DELTA_RENAMED:  Changeset.MOVE,
+        GIT_DELTA_COPIED:   Changeset.COPY,
+    }
 
     def get_changes(self, old_path, old_rev, new_path, new_rev,
                     ignore_ancestry=0):
-        # TODO: handle renames/copies, ignore_ancestry
-        if old_path != new_path:
-            raise TracError("not supported in git_fs")
+        # TODO: handle ignore_ancestry
 
-        with self.git.get_historian(old_rev,
-                                    old_path.strip('/')) as old_historian:
-            with self.git.get_historian(new_rev,
-                                        new_path.strip('/')) as new_historian:
-                for chg in self.git.diff_tree(old_rev, new_rev,
-                                              self.normalize_path(new_path)):
-                    mode1, mode2, obj1, obj2, action, path, path2 = chg
+        old_path = self.normalize_path(old_path)
+        old_commit = self._get_commit(old_rev)
+        old_rev = old_commit.hex
+        old_tree = self._get_tree(old_commit.tree, old_path)
+        new_path = self.normalize_path(new_path)
+        new_commit = self._get_commit(new_rev)
+        new_tree = self._get_tree(new_commit.tree, new_path)
+        new_rev = new_commit.hex
 
-                    kind = Node.FILE
-                    if mode2.startswith('04') or mode1.startswith('04'):
-                        kind = Node.DIRECTORY
+        def sorted_key(values):
+            return values[1]
 
-                    change = GitChangeset.action_map[action]
+        def sorted_files(diff):
+            files = [(self._from_fspath(old), self._from_fspath(new), status)
+                     for old, new, status in diff.changes.get('files', ())]
+            return sorted(files, key=sorted_key)
 
-                    old_node = None
-                    new_node = None
-
-                    if change != Changeset.ADD:
-                        old_node = self.get_node(path, old_rev, old_historian)
-                    if change != Changeset.DELETE:
-                        new_node = self.get_node(path, new_rev, new_historian)
-
-                    yield old_node, new_node, kind, change
-
-    def next_rev(self, rev, path=''):
-        return self.git.hist_next_revision(rev)
+        diff = old_tree.diff(new_tree)
+        for old_file, new_file, status in sorted_files(diff):
+            action = GitRepository._DELTA_STATUS_MAP.get(status)
+            if not action:
+                continue
+            old_node = new_node = None
+            if status != GIT_DELTA_ADDED:
+                old_node = self.get_node(posixpath.join(old_path, old_file),
+                                         old_rev)
+            if status != GIT_DELTA_DELETED:
+                new_node = self.get_node(posixpath.join(new_path, new_file),
+                                         new_rev)
+            yield old_node, new_node, Node.FILE, action
 
     def previous_rev(self, rev, path=''):
-        return self.git.hist_prev_revision(rev)
+        for commit, action in self.get_node(path, rev)._walk_commits(rev):
+            for parent in commit.parents:
+                return parent.hex
+
+    def next_rev(self, rev, path=''):
+        path = self.normalize_path(path)
+
+        for name, ref, walker in self._iter_ref_walkers(rev):
+            if rev not in walker:
+                continue
+            for commit in walker.reverse(rev):
+                if not any(p.hex == rev for p in commit.parents):
+                    continue
+                tree = commit.tree
+                entry = self._get_tree(tree, path)
+                for parent in commit.parents:
+                    parent_tree = parent.tree
+                    if entry.oid == parent_tree.oid:
+                        continue
+                    parent_entry = self._get_tree(parent_tree, path)
+                    if entry is parent_entry is None:
+                        continue
+                    if (entry is None or parent_entry is None or
+                        entry.oid != parent_entry.oid):
+                        return commit.hex
+                rev = commit.hex
 
     def parent_revs(self, rev):
-        return self.git.parents(rev)
+        commit = self._get_commit(rev)
+        return [c.hex for c in commit.parents]
 
     def child_revs(self, rev):
-        return self.git.children(rev)
+        def iter_children():
+            seen = set()
+            for name, ref, walker in self._iter_ref_walkers(rev):
+                if rev not in walker:
+                    continue
+                for commit in walker.reverse(rev):
+                    if commit.oid in seen:
+                        break
+                    seen.add(commit.oid)
+                    if any(p.hex == rev for p in commit.parents):
+                        yield commit
+        return [c.hex for c in iter_children()]
 
     def rev_older_than(self, rev1, rev2):
-        rc = self.git.rev_is_anchestor_of(rev1, rev2)
-        return rc
-
-    # def clear(self, youngest_rev=None):
-    #     self.youngest = None
-    #     if youngest_rev is not None:
-    #         self.youngest = self.normalize_rev(youngest_rev)
-    #     self.oldest = None
+        oid1 = self._get_commit(rev1).oid
+        oid2 = self._get_commit(rev2).oid
+        return any(oid2 == c.oid
+                   for c in self.git_repos.walk(oid1, GIT_SORT_TIME))
 
     def clear(self, youngest_rev=None):
-        self.sync()
-
-    def sync(self, rev_callback=None, clean=None):
-        if rev_callback:
-            revs = set(self.git.all_revs())
-
-        if not self.git.sync():
-            return None # nothing expected to change
-
-        if rev_callback:
-            revs = set(self.git.all_revs()) - revs
-            for rev in revs:
-                rev_callback(rev)
+        self._ref_walkers = None
 
 
 class GitNode(Node):
 
-    def __init__(self, repos, path, rev, log, ls_tree_info=None,
-                 historian=None):
-        self.log = log
-        self.repos = repos
-        self.fs_sha = None # points to either tree or blobs
-        self.fs_perm = None
-        self.fs_size = None
-        rev = rev and str(rev) or 'HEAD'
+    def __init__(self, repos, path, rev, created_rev=None):
+        self.log = repos.log
 
-        kind = Node.DIRECTORY
-        p = path.strip('/')
-        if p: # ie. not the root-tree
-            if not ls_tree_info:
-                ls_tree_info = repos.git.ls_tree(rev, p) or None
-                if ls_tree_info:
-                    [ls_tree_info] = ls_tree_info
-
-            if not ls_tree_info:
+        if type(rev) is pygit2.Commit:
+            commit = rev
+            rev = commit.hex
+        else:
+            commit = repos._get_commit(rev, raises=False)
+            if not commit:
                 raise NoSuchNode(path, rev)
+        normrev = commit.hex
 
-            self.fs_perm, k, self.fs_sha, self.fs_size, _ = ls_tree_info
+        normpath = repos.normalize_path(path)
+        tree_entry = None
+        git_object = commit.tree
+        if normpath:
+            tree_entry = repos._get_tree_entry(git_object, normpath)
+            if tree_entry is None:
+                raise NoSuchNode(path, rev)
+            git_object = tree_entry.to_object()
 
-            # fix-up to the last commit-rev that touched this node
-            rev = repos.git.last_change(rev, p, historian)
+        if git_object.type == GIT_OBJ_TREE:
+            kind = Node.DIRECTORY
+            tree = git_object
+            blob = None
+        elif git_object.type == GIT_OBJ_BLOB:
+            kind = Node.FILE
+            tree = None
+            blob = git_object
+        else:
+            raise NoSuchNode(path, rev)
 
-            if k == 'tree':
-                pass
-            elif k == 'commit':
-                # FIXME: this is a workaround for missing git submodule
-                #        support in the plugin
-                pass
-            elif k == 'blob':
-                kind = Node.FILE
-            else:
-                raise TracError("Internal error (got unexpected object " \
-                                "kind '%s')" % k)
+        self.commit = commit
+        self.tree_entry = tree_entry
+        self.tree = tree
+        self.blob = blob
+        self.created_path = normpath  # XXX how to use?
+        self._created_rev = created_rev
+        Node.__init__(self, repos, normpath, normrev, kind)
 
-        self.created_path = path
-        self.created_rev = rev
+    @property
+    def created_rev(self):
+        if self._created_rev is None:
+            for commit, action in self._walk_commits(self.rev):
+                self._created_rev = commit.hex
+                break
+        return self._created_rev
 
-        Node.__init__(self, repos, path, rev, kind)
+    def _walk_commits(self, rev, path=None):
+        if path is None:
+            path = self.path
 
-    def __git_path(self):
-        """return path as expected by PyGIT"""
-        p = self.path.strip('/')
-        if self.isfile:
-            assert p
-            return p
-        if self.isdir:
-            return p and (p + '/')
-
-        raise TracError("internal error")
+        _get_tree = self.repos._get_tree
+        path = self.repos._to_fspath(path)
+        commit = None
+        for commit in self.repos.git_repos.walk(rev, GIT_SORT_TIME):
+            tree = _get_tree(commit.tree, path)
+            for parent in commit.parents:
+                parent_tree = _get_tree(parent.tree, path)
+                action = None
+                if tree is parent_tree is None:
+                    return
+                if tree is None:
+                    action = Changeset.DELETE
+                elif parent_tree is None:
+                    action = Changeset.ADD
+                elif parent_tree.oid != tree.oid:
+                    action = Changeset.EDIT
+                else:
+                    continue
+                yield commit, action
+                break
+        if commit and not commit.parents:
+            yield commit, Changeset.ADD
 
     def get_content(self):
         if not self.isfile:
             return None
-
-        return self.repos.git.get_file(self.fs_sha)
+        return StringIO(self.blob.data)
 
     def get_properties(self):
-        return self.fs_perm and {'mode': self.fs_perm } or {}
+        props = {}
+        if self.tree_entry:
+            props['mode'] = '%06o' % self.tree_entry.attributes
+        return props
 
     def get_annotations(self):
         if not self.isfile:
             return
-
-        return [rev for rev, lineno in \
-                self.repos.git.blame(self.rev,self.__git_path())]
+        # TODO: libgit2 v0.17 and pygit2 v0.17.3 have no blame feature
+        raise NotImplementedError()
 
     def get_entries(self):
         if not self.isdir:
             return
 
-        with self.repos.git.get_historian(self.rev,
-                                          self.path.strip('/')) as historian:
-            for ent in self.repos.git.ls_tree(self.rev, self.__git_path()):
-                yield GitNode(self.repos, ent[-1], self.rev, self.log, ent,
-                              historian)
+        repos = self.repos
+        _from_fspath = repos._from_fspath
+        path = repos._to_fspath(self.path)
+        names = [entry.name for entry in self.tree]
+
+        def get_entries(tree):
+            if not tree:
+                tree = ()
+            return dict((name, tree[name] if name in tree else None)
+                        for name in names)
+
+        def get_created_revs():
+            revs = {}
+            _get_tree = repos._get_tree
+            for commit in repos.git_repos.walk(self.created_rev,
+                                               GIT_SORT_TIME):
+                tree = _get_tree(commit.tree, path)
+                entries = get_entries(tree)
+                for parent in commit.parents:
+                    parent_tree = _get_tree(parent.tree, path)
+                    parent_entries = get_entries(parent_tree)
+                    for name in names:
+                        if name in revs:
+                            continue
+                        entry = entries[name]
+                        parent_entry = parent_entries[name]
+                        if entry is parent_entry is None:
+                            revs[name] = None
+                            continue
+                        if (entry is None or parent_entry is None or
+                            entry.oid != parent_entry.oid):
+                            revs[name] = commit.hex
+                            continue
+                    if len(revs) == len(names):
+                        return revs
+            return revs
+
+        created_revs = get_created_revs()
+        for name in names:
+            yield GitNode(repos, posixpath.join(self.path, _from_fspath(name)),
+                          self.rev, created_rev=created_revs.get(name))
 
     def get_content_type(self):
         if self.isdir:
             return None
-
         return ''
 
     def get_content_length(self):
         if not self.isfile:
             return None
-
-        if self.fs_size is None:
-            self.fs_size = self.repos.git.get_obj_size(self.fs_sha)
-
-        return self.fs_size
+        return self.blob.size
 
     def get_history(self, limit=None):
-        # TODO: find a way to follow renames/copies
-        for is_last, rev in _last_iterable(self.repos.git.history(self.rev,
-                                                self.__git_path(), limit)):
-            yield (self.path, rev, Changeset.EDIT if not is_last else
-                                   Changeset.ADD)
+        path = self.path
+        for commit, action in self._walk_commits(self.rev):
+            yield path, commit.hex, action
 
     def get_last_modified(self):
         if not self.isfile:
             return None
-
-        try:
-            msg, props = self.repos.git.read_commit(self.rev)
-            user, ts = _parse_user_time(props['committer'][0])
-        except:
-            self.log.error("internal error (could not get timestamp from "
-                           "commit '%s')" % self.rev)
-            return None
-
-        return ts
+        return self.repos._get_commit_time(self.commit)
 
 
 class GitChangeset(Changeset):
@@ -626,120 +863,91 @@ class GitChangeset(Changeset):
     Corresponds to a Git commit blob.
     """
 
-    action_map = { # see also git-diff-tree(1) --diff-filter
-        'A': Changeset.ADD,
-        'M': Changeset.EDIT, # modified
-        'T': Changeset.EDIT, # file type (mode) change
-        'D': Changeset.DELETE,
-        'R': Changeset.MOVE, # renamed
-        'C': Changeset.COPY
-        } # TODO: U, X, B
+    def __init__(self, repos, rev):
+        self.log = repos.log
 
-    def __init__(self, repos, sha):
-        if sha is None:
-            raise NoSuchChangeset(sha)
-
-        try:
-            msg, props = repos.git.read_commit(sha)
-        except PyGIT.GitErrorSha:
-            raise NoSuchChangeset(sha)
-
-        self.props = props
-
-        assert 'children' not in props
-        _children = list(repos.git.children(sha))
-        if _children:
-            props['children'] = _children
-
-        committer, author = self._get_committer_and_author()
-        # use 1st author/committer as changeset owner/timestamp
-        c_user = a_user = c_time = a_time = None
-        if committer:
-            c_user, c_time = _parse_user_time(committer)
-        if author:
-            a_user, a_time = _parse_user_time(author)
-
-        if repos.use_committer_time:
-            time = c_time or a_time
+        if type(rev) is pygit2.Commit:
+            commit = rev
+            rev = commit.hex
         else:
-            time = a_time or c_time
+            if not rev:
+                raise NoSuchChangeset(rev)
+            commit = repos._get_commit(rev)
+            rev = commit.hex
 
-        if repos.use_committer_id:
-            user = c_user or a_user
-        else:
-            user = a_user or c_user
+        author = repos._get_commit_username(commit)
+        date = repos._get_commit_time(commit)
 
-        # try to resolve email address to trac uid
-        user = repos.rlookup_uid(user) or user
+        self.commit = commit
+        Changeset.__init__(self, repos, rev, commit.message, author, date)
 
-        Changeset.__init__(self, repos, rev=sha, message=msg, author=user,
-                           date=time)
+    def get_branches(self):
+        branches = self.repos._get_branches(self.rev)
+        return [(name, rev == self.rev) for name, rev in branches]
 
-    def _get_committer_and_author(self):
-        committer = author = None
-        if 'committer' in self.props:
-            committer = self.props['committer'][0]
-        if 'author' in self.props:
-            author = self.props['author'][0]
-        return committer, author
+    def get_tags(self):
+        repos = self.repos
+        git_repos = repos.git_repos
+
+        def iter_tags():
+            for name in git_repos.listall_references():
+                if not name.startswith('refs/tags/'):
+                    continue
+                ref = git_repos.lookup_reference(name)
+                git_object = git_repos[ref.oid]
+                if git_object.type == GIT_OBJ_TAG:
+                    git_object = git_repos[git_object.target]
+                if self.rev == git_object.hex:
+                    yield repos._from_fspath(name[10:])
+
+        return sorted(iter_tags())
 
     def get_properties(self):
         properties = {}
+        commit = self.commit
 
-        if 'parent' in self.props:
-            properties['Parents'] = self.props['parent']
+        if commit.parents:
+            properties['git-Parents'] = [c.hex for c in commit.parents]
 
-        if 'children' in self.props:
-            properties['Children'] = self.props['children']
+        if (commit.author.name != commit.committer.name or
+            commit.author.email != commit.committer.email):
+            properties['git-committer'] = commit.committer
+            properties['git-author'] = commit.author
 
-        committer, author = self._get_committer_and_author()
-        if author != committer:
-            properties['git-committer'] = _parse_user_time(committer)
-            properties['git-author'] = _parse_user_time(author)
-
-        branches = list(self.repos.git.get_branch_contains(self.rev,
-                                                           resolve=True))
+        branches = self.repos._get_branches(self.rev)
         if branches:
-            properties['Branches'] = branches
+            properties['git-Branches'] = branches
+        tags = self.get_tags()
+        if tags:
+            properties['git-Tags'] = tags
+
+        children = self.repos.child_revs(self.rev)
+        if children:
+            properties['git-Children'] = children
 
         return properties
 
     def get_changes(self):
-        paths_seen = set()
-        for parent in self.props.get('parent', [None]):
-            for mode1, mode2, obj1, obj2, action, path1, path2 in \
-                    self.repos.git.diff_tree(parent, self.rev,
-                                             find_renames=True):
-                path = path2 or path1
-                p_path, p_rev = path1, parent
+        normalize_path = self.repos.normalize_path
+        commit = self.commit
+        files = None
+        for parent in commit.parents:
+            tmp = parent.tree.diff(commit.tree).changes.get('files', ())
+            if not files:
+                files = set(tmp)
+            else:
+                files &= set(tmp)
 
-                kind = Node.FILE
-                if mode2.startswith('04') or mode1.startswith('04'):
-                    kind = Node.DIRECTORY
+        if not files:
+            return
 
-                action = GitChangeset.action_map[action[0]]
-
-                if action == Changeset.ADD:
-                    p_path = ''
-                    p_rev = None
-
-                # CachedRepository expects unique (rev, path, change_type) key
-                # this is only an issue in case of merges where files required
-                # editing
-                if path in paths_seen:
-                    continue
-
-                paths_seen.add(path)
-
-                yield path, kind, action, p_path, p_rev
-
-
-    def get_branches(self):
-        _rev = self.rev
-
-        return [(k, v == _rev)
-                for k, v in self.repos.git.get_branch_contains(_rev,
-                                                               resolve=True)]
+        files = [(normalize_path(old), normalize_path(new), status)
+                 for old, new, status in files]
+        for old_path, new_path, status in sorted(files, key=lambda v: v[1]):
+            action = GitRepository._DELTA_STATUS_MAP.get(status)
+            if not action:
+                continue
+            yield old_path, Node.FILE, action, new_path, parent.hex
 
 
 class GitwebProjectsRepositoryProvider(Component):
