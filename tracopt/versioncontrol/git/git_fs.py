@@ -519,9 +519,11 @@ class GitRepository(Repository):
         return path.strip('/') if path else ''
 
     def normalize_rev(self, rev):
-        rev = unicode(rev, 'latin1') \
-              if isinstance(rev, str) else to_unicode(rev)
-
+        if rev is not None:
+            if isinstance(rev, str):
+                rev = unicode(rev, 'latin1')
+            elif not isinstance(rev, unicode):
+                rev = to_unicode(rev)
         if not rev:
             return self.get_youngest_rev()
         commit = self._get_commit(rev, raises=False)
