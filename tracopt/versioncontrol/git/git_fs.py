@@ -35,6 +35,7 @@ from genshi.builder import tag
 
 from trac.config import BoolOption, IntOption, PathOption, Option
 from trac.core import Component, implements, TracError
+from trac.env import ISystemInfoProvider
 from trac.util import shorten_line
 from trac.util.datefmt import (
     utc, FixedOffset, to_timestamp, format_datetime, user_time,
@@ -150,7 +151,13 @@ class _cached_walker(object):
 
 class GitConnector(Component):
 
-    implements(IRepositoryConnector, IWikiSyntaxProvider)
+    implements(ISystemInfoProvider, IRepositoryConnector, IWikiSyntaxProvider)
+
+    # ISystemInfoProvider methods
+
+    def get_system_info(self):
+        if pygit2:
+            yield 'pygit2', pygit2.__version__
 
     # IWikiSyntaxProvider methods
 
