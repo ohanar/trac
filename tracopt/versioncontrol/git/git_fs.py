@@ -790,13 +790,17 @@ class GitNode(Node):
     def get_properties(self):
         props = {}
         if self.tree_entry:
-            props['mode'] = '%06o' % self.tree_entry.attributes
+            mode = getattr(self.tree_entry, 'filemode', None)
+            if mode is None:
+                mode = self.tree_entry.attributes # 0.17.3
+            props['mode'] = '%06o' % mode
         return props
 
     def get_annotations(self):
         if not self.isfile:
             return
         # TODO: libgit2 v0.17 and pygit2 v0.17.3 have no blame feature
+        # ('blame' branch - https://github.com/libgit2/libgit2/pull/1317)
         raise NotImplementedError()
 
     def get_entries(self):
@@ -950,8 +954,8 @@ class GitChangeset(Changeset):
         if not files:
             return
 
-        files = [(normalize_path(old), normalize_path(new), status)
-                 for old, new, status in files]
+        files = [(normalize_path(chg[0]), normalize_path(chg[1]), chg[2])
+                 for chg in files] # chg is (old, new, status[, similarity])
         for old_path, new_path, status in sorted(files, key=lambda v: v[1]):
             action = GitRepository._DELTA_STATUS_MAP.get(status)
             if not action:
