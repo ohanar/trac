@@ -158,6 +158,9 @@ class GitConnector(Component):
     def get_system_info(self):
         if pygit2:
             yield 'pygit2', pygit2.__version__
+            libgit2_version = getattr(pygit2, '__libgit2_version__', None)
+            if libgit2_version:
+                yield 'libgit2', libgit2_version
 
     # IWikiSyntaxProvider methods
 
