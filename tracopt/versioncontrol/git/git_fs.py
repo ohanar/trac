@@ -448,17 +448,17 @@ class GitRepository(Repository):
         entry = self._get_tree_entry(tree, path)
         return entry.to_object() if entry else None
 
-    def _get_commit(self, rev, raises=True):
-        if not rev:
-            return self.git_repos.head
+    def _get_commit(self, oid):
+        git_repos = self.git_repos
         try:
-            git_object = self.git_repos[rev]
-            if git_object.type == GIT_OBJ_COMMIT:
-                return git_object
+            git_object = git_repos[oid]
         except (KeyError, ValueError):
-            pass
-        if raises:
-            raise NoSuchChangeset(rev)
+            return None
+        if git_object.type == GIT_OBJ_TAG:
+            git_object = git_repos[git_object.target]
+        if git_object.type == GIT_OBJ_COMMIT:
+            return git_object
+        return None
 
     def _get_ref_walkers(self):
         walkers = self._ref_walkers
@@ -471,11 +471,8 @@ class GitRepository(Repository):
             if not name.startswith('refs/heads/'):
                 continue
             ref = git_repos.lookup_reference(name)
-            try:
-                commit = git_repos[ref.oid]
-            except KeyError:
-                continue
-            if commit.type != GIT_OBJ_COMMIT:
+            commit = self._get_commit(ref.oid)
+            if not commit:
                 continue
             walkers[name] = _cached_walker(git_repos.walk(commit.oid,
                                                           GIT_SORT_TIME))
@@ -504,14 +501,57 @@ class GitRepository(Repository):
                       for name, ref, walker in self._iter_ref_walkers(rev)
                       if rev in walker)
 
+    def _resolve_rev(self, rev, raises=True):
+        if rev is not None and not isinstance(rev, unicode):
+            normrev = unicode(rev, 'latin1') if isinstance(rev, str) \
+                      else to_unicode(rev)
+        else:
+            normrev = rev
+        if not normrev:
+            try:
+                return self.git_repos.head
+            except pygit2.GitError:
+                if raises:
+                    raise NoSuchChangeset(rev)
+                return None
+
+        commit = self._get_commit(normrev)
+        if commit:
+            return commit
+
+        for name in self.git_repos.listall_references():
+            ref = self.git_repos.lookup_reference(name)
+            name = self._from_fspath(name)
+            if name.startswith('refs/heads/'):
+                match = name[11:] == normrev
+            elif name.startswith('refs/tags/'):
+                match = name[10:] == normrev
+            else:
+                continue
+            if not match:
+                continue
+            commit = self._get_commit(ref.oid)
+            if commit:
+                return commit
+
+        if raises:
+            raise NoSuchChangeset(rev)
+
     def close(self):
         self.clear()
         self.git_repos = None
 
     def get_youngest_rev(self):
-        return self.git_repos.head.hex
+        try:
+            return self.git_repos.head.hex
+        except pygit2.GitError:
+            return None
 
     def get_oldest_rev(self):
+        try:
+            self.git_repos.head
+        except pygit2.GitError:
+            return None
         sort = GIT_SORT_TIME | GIT_SORT_REVERSE
         for commit in self.git_repos.walk(self.git_repos.head.oid, sort):
             return commit.hex
@@ -522,29 +562,7 @@ class GitRepository(Repository):
         return path.strip('/') if path else ''
 
     def normalize_rev(self, rev):
-        if rev is not None:
-            if isinstance(rev, str):
-                rev = unicode(rev, 'latin1')
-            elif not isinstance(rev, unicode):
-                rev = to_unicode(rev)
-        if not rev:
-            return self.get_youngest_rev()
-        commit = self._get_commit(rev, raises=False)
-        if commit:
-            return commit.hex
-
-        for name in self.git_repos.listall_references():
-            ref = self.git_repos.lookup_reference(name)
-            name = self._from_fspath(name)
-            if name.startswith('refs/heads/') and name[11:] == rev:
-                return self._get_commit(ref.oid).hex
-            if name.startswith('refs/tags/') and name[10:] == rev:
-                git_object = self.git_repos[ref.oid]
-                if git_object.type == GIT_OBJ_TAG:
-                    git_object = self.git_repos[git_object.target]
-                return git_object.hex
-
-        raise NoSuchChangeset(rev)
+        return self._resolve_rev(rev).hex
 
     def short_rev(self, rev):
         rev = self.normalize_rev(rev)
@@ -562,7 +580,9 @@ class GitRepository(Repository):
     display_rev = short_rev
 
     def get_node(self, path, rev=None):
-        rev = self.normalize_rev(rev)
+        commit = self._resolve_rev(rev, raises=False)
+        if not commit:
+            raise NoSuchNode(path, rev)
         path = self.normalize_path(path)
         return GitNode(self, path, rev)
 
@@ -575,14 +595,14 @@ class GitRepository(Repository):
 
         for name, ref in refs:
             if name.startswith('refs/heads/'):
-                yield 'branches', name[11:], '/', ref.hex
+                commit = self._get_commit(ref.oid)
+                if commit:
+                    yield 'branches', name[11:], '/', commit.hex
 
         for name, ref in refs:
             if name.startswith('refs/tags/'):
-                git_object = git_repos[ref.oid]
-                if git_object.type == GIT_OBJ_TAG:
-                    git_object = git_repos[git_object.target]
-                yield 'tags', name[10:], '/', git_object.hex
+                commit = self._get_commit(ref.oid)
+                yield 'tags', name[10:], '/', commit.hex
 
     def get_path_url(self, path, rev):
         return self.params.get('url')
@@ -607,7 +627,10 @@ class GitRepository(Repository):
             yield GitChangeset(self, commit)
 
     def get_changeset(self, rev):
-        return GitChangeset(self, rev)
+        return GitChangeset(self, self._resolve_rev(rev))
+
+    def get_changeset_uid(self, rev):
+        return rev
 
     _DELTA_STATUS_MAP = {
         GIT_DELTA_ADDED:    Changeset.ADD,
@@ -622,13 +645,14 @@ class GitRepository(Repository):
         # TODO: handle ignore_ancestry
 
         old_path = self.normalize_path(old_path)
-        old_commit = self._get_commit(old_rev)
+        old_commit = self._resolve_rev(old_rev)
         old_rev = old_commit.hex
         old_tree = self._get_tree(old_commit.tree, old_path)
         new_path = self.normalize_path(new_path)
-        new_commit = self._get_commit(new_rev)
+        new_commit = self._resolve_rev(new_rev)
         new_tree = self._get_tree(new_commit.tree, new_path)
         new_rev = new_commit.hex
+        diff = old_tree.diff(new_tree)
 
         def sorted_key(values):
             return values[1]
@@ -638,26 +662,31 @@ class GitRepository(Repository):
                      for old, new, status in diff.changes.get('files', ())]
             return sorted(files, key=sorted_key)
 
-        diff = old_tree.diff(new_tree)
-        for old_file, new_file, status in sorted_files(diff):
-            action = GitRepository._DELTA_STATUS_MAP.get(status)
-            if not action:
-                continue
-            old_node = new_node = None
-            if status != GIT_DELTA_ADDED:
-                old_node = self.get_node(posixpath.join(old_path, old_file),
-                                         old_rev)
-            if status != GIT_DELTA_DELETED:
-                new_node = self.get_node(posixpath.join(new_path, new_file),
-                                         new_rev)
-            yield old_node, new_node, Node.FILE, action
+        def iter_changes(diff):
+            for old_file, new_file, status in sorted_files(diff):
+                action = GitRepository._DELTA_STATUS_MAP.get(status)
+                if not action:
+                    continue
+                old_node = new_node = None
+                if status != GIT_DELTA_ADDED:
+                    old_node = self.get_node(
+                                posixpath.join(old_path, old_file), old_rev)
+                if status != GIT_DELTA_DELETED:
+                    new_node = self.get_node(
+                                posixpath.join(new_path, new_file), new_rev)
+                yield old_node, new_node, Node.FILE, action
+
+        return iter_changes(diff)
 
     def previous_rev(self, rev, path=''):
-        for commit, action in self.get_node(path, rev)._walk_commits(rev):
+        rev = self.normalize_rev(rev)
+        path = self.normalize_path(path)
+        for commit, action in GitNode(self, path, rev)._walk_commits(rev):
             for parent in commit.parents:
                 return parent.hex
 
     def next_rev(self, rev, path=''):
+        rev = self.normalize_rev(rev)
         path = self.normalize_path(path)
 
         for name, ref, walker in self._iter_ref_walkers(rev):
@@ -681,11 +710,11 @@ class GitRepository(Repository):
                 rev = commit.hex
 
     def parent_revs(self, rev):
-        commit = self._get_commit(rev)
+        commit = self._resolve_rev(rev)
         return [c.hex for c in commit.parents]
 
     def child_revs(self, rev):
-        def iter_children():
+        def iter_children(rev):
             seen = set()
             for name, ref, walker in self._iter_ref_walkers(rev):
                 if rev not in walker:
@@ -696,13 +725,21 @@ class GitRepository(Repository):
                     seen.add(commit.oid)
                     if any(p.hex == rev for p in commit.parents):
                         yield commit
-        return [c.hex for c in iter_children()]
+        return [c.hex for c in iter_children(self.normalize_rev(rev))]
 
     def rev_older_than(self, rev1, rev2):
-        oid1 = self._get_commit(rev1).oid
-        oid2 = self._get_commit(rev2).oid
+        oid1 = self._resolve_rev(rev1).oid
+        oid2 = self._resolve_rev(rev2).oid
         return any(oid2 == c.oid
                    for c in self.git_repos.walk(oid1, GIT_SORT_TIME))
+
+    def get_path_history(self, path, rev=None, limit=None):
+        def iter_nodes(node):
+            for path, rev, action in node.get_history(limit=limit):
+                yield GitNode(path, rev)
+
+        return iter_nodes(GitNode(self.normalize_path(path),
+                                  self.normalize_rev(rev)))
 
     def clear(self, youngest_rev=None):
         self._ref_walkers = None
@@ -710,23 +747,22 @@ class GitRepository(Repository):
 
 class GitNode(Node):
 
-    def __init__(self, repos, path, rev, created_rev=None):
+    def __init__(self, repos, path, rev, created_commit=None):
         self.log = repos.log
 
         if type(rev) is pygit2.Commit:
             commit = rev
             rev = commit.hex
         else:
-            commit = repos._get_commit(rev, raises=False)
+            commit = repos._resolve_rev(rev, raises=False)
             if not commit:
                 raise NoSuchNode(path, rev)
         normrev = commit.hex
 
-        normpath = repos.normalize_path(path)
         tree_entry = None
         git_object = commit.tree
-        if normpath:
-            tree_entry = repos._get_tree_entry(git_object, normpath)
+        if path:
+            tree_entry = repos._get_tree_entry(git_object, path)
             if tree_entry is None:
                 raise NoSuchNode(path, rev)
             git_object = tree_entry.to_object()
@@ -746,17 +782,21 @@ class GitNode(Node):
         self.tree_entry = tree_entry
         self.tree = tree
         self.blob = blob
-        self.created_path = normpath  # XXX how to use?
-        self._created_rev = created_rev
-        Node.__init__(self, repos, normpath, normrev, kind)
+        self.created_path = path  # XXX how to use?
+        self._created_commit = created_commit
+        Node.__init__(self, repos, path, normrev, kind)
+
+    def _get_created_commit(self):
+        commit = self._created_commit
+        if commit is None:
+            for commit, action in self._walk_commits(self.rev):
+                self._created_commit = commit
+                break
+        return commit
 
     @property
     def created_rev(self):
-        if self._created_rev is None:
-            for commit, action in self._walk_commits(self.rev):
-                self._created_rev = commit.hex
-                break
-        return self._created_rev
+        return self._get_created_commit().hex
 
     def _walk_commits(self, rev, path=None):
         if path is None:
@@ -813,7 +853,7 @@ class GitNode(Node):
         repos = self.repos
         _from_fspath = repos._from_fspath
         path = repos._to_fspath(self.path)
-        names = [entry.name for entry in self.tree]
+        names = sorted(entry.name for entry in self.tree)
 
         def get_entries(tree):
             if not tree:
@@ -821,8 +861,8 @@ class GitNode(Node):
             return dict((name, tree[name] if name in tree else None)
                         for name in names)
 
-        def get_created_revs():
-            revs = {}
+        def get_commits():
+            commits = {}
             _get_tree = repos._get_tree
             for commit in repos.git_repos.walk(self.created_rev,
                                                GIT_SORT_TIME):
@@ -832,25 +872,25 @@ class GitNode(Node):
                     parent_tree = _get_tree(parent.tree, path)
                     parent_entries = get_entries(parent_tree)
                     for name in names:
-                        if name in revs:
+                        if name in commits:
                             continue
                         entry = entries[name]
                         parent_entry = parent_entries[name]
                         if entry is parent_entry is None:
-                            revs[name] = None
+                            commits[name] = None
                             continue
                         if (entry is None or parent_entry is None or
                             entry.oid != parent_entry.oid):
-                            revs[name] = commit.hex
+                            commits[name] = commit
                             continue
-                    if len(revs) == len(names):
-                        return revs
-            return revs
+                    if len(commits) == len(names):
+                        return commits
+            return commits
 
-        created_revs = get_created_revs()
+        commits = get_commits()
         for name in names:
             yield GitNode(repos, posixpath.join(self.path, _from_fspath(name)),
-                          self.rev, created_rev=created_revs.get(name))
+                          self.rev, created_commit=commits.get(name))
 
     def get_content_type(self):
         if self.isdir:
@@ -864,13 +904,18 @@ class GitNode(Node):
 
     def get_history(self, limit=None):
         path = self.path
+        count = 0
         for commit, action in self._walk_commits(self.rev):
             yield path, commit.hex, action
+            count += 1
+            if limit == count:
+                return
 
     def get_last_modified(self):
         if not self.isfile:
             return None
-        return self.repos._get_commit_time(self.commit)
+        commit = self._get_created_commit()
+        return self.repos._get_commit_time(commit)
 
 
 class GitChangeset(Changeset):
@@ -886,9 +931,7 @@ class GitChangeset(Changeset):
             commit = rev
             rev = commit.hex
         else:
-            if not rev:
-                raise NoSuchChangeset(rev)
-            commit = repos._get_commit(rev)
+            commit = repos._resolve_rev(rev)
             rev = commit.hex
 
         author = repos._get_commit_username(commit)
@@ -947,12 +990,26 @@ class GitChangeset(Changeset):
         normalize_path = self.repos.normalize_path
         commit = self.commit
         files = None
-        for parent in commit.parents:
-            tmp = parent.tree.diff(commit.tree).changes.get('files', ())
-            if not files:
-                files = set(tmp)
-            else:
-                files &= set(tmp)
+        parent_rev = commit.parents[0].hex if commit.parents else u'0' * 40
+        if commit.parents:
+            for parent in commit.parents:
+                tmp = parent.tree.diff(commit.tree).changes.get('files', ())
+                tmp = set(tmp)
+                files = files & tmp if files else tmp
+        else:
+            def get_entries(tree, path=None):
+                paths = []
+                for entry in tree:
+                    name = entry.name
+                    name = posixpath.join(path, name) if path else name
+                    entry = entry.to_object()
+                    if entry.type == GIT_OBJ_BLOB:
+                        paths.append(name)
+                    elif entry.type == GIT_OBJ_TREE:
+                        paths.extend(get_entries(entry, name))
+                return paths
+            files = [(path, path, GIT_DELTA_ADDED)
+                     for path in get_entries(commit.tree)]
 
         if not files:
             return
@@ -963,7 +1020,7 @@ class GitChangeset(Changeset):
             action = GitRepository._DELTA_STATUS_MAP.get(status)
             if not action:
                 continue
-            yield old_path, Node.FILE, action, new_path, parent.hex
+            yield old_path, Node.FILE, action, new_path, parent_rev
 
 
 class GitwebProjectsRepositoryProvider(Component):
