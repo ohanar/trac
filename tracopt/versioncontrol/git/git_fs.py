@@ -157,10 +157,30 @@ class GitConnector(Component):
 
     def get_system_info(self):
         if pygit2:
-            yield 'pygit2', pygit2.__version__
-            libgit2_version = getattr(pygit2, 'LIBGIT2_VERSION', None)
+            pygit2_version = pygit2.__version__
+            if hasattr(pygit2, 'LIBGIT2_VERSION'):
+                pygit2_version = '%s (compiled with libgit2 %s)' % \
+                                 (pygit2_version, pygit2.LIBGIT2_VERSION)
+            yield 'pygit2', pygit2_version
+            libgit2_version = self._get_libgit2_version()
             if libgit2_version:
                 yield 'libgit2', libgit2_version
+
+    def _get_libgit2_version(self):
+        from ctypes import CDLL, CFUNCTYPE, POINTER, c_int, pointer
+        from ctypes.util import find_library
+        try:
+            sharedlib = CDLL('git2.dll' if os.name == 'nt' else
+                             find_library('git2'))
+            prototype = CFUNCTYPE(None, POINTER(c_int), POINTER(c_int),
+                                  POINTER(c_int))
+            func = prototype(('git_libgit2_version', sharedlib))
+            args = [pointer(c_int(0)) for i in xrange(3)]
+            func(*args)
+            return '.'.join([str(arg[0]) for arg in args])
+        except:
+            self.log.warn('Exception caught while retrieving libgit2 version',
+                          exc_info=True)
 
     # IWikiSyntaxProvider methods
 
