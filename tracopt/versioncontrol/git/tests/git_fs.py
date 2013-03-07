@@ -26,7 +26,7 @@ except ImportError:
 from trac.test import EnvironmentStub, locate
 from trac.util.compat import close_fds
 from trac.util.datefmt import utc
-from trac.versioncontrol import DbRepositoryProvider
+from trac.versioncontrol import DbRepositoryProvider, RepositoryManager
 from trac.versioncontrol.api import (
     Changeset, Node, NoSuchChangeset, NoSuchNode,
 )
@@ -52,7 +52,7 @@ def spawn(*args, **kwargs):
 
 def setup_repository(env, use_dump=True):
     if os.path.isdir(REPOS_PATH):
-        shutil.rmtree(REPOS_PATH)
+        rmtree(REPOS_PATH)
     pygit2.init_repository(REPOS_PATH, True)
     if use_dump:
         with open(dumpfile_path, 'rb') as f:
@@ -63,6 +63,25 @@ def setup_repository(env, use_dump=True):
     return env.get_repository(REPOS_NAME)
 
 
+def rmtree(path):
+    import errno
+    def onerror(function, path, excinfo):
+        # `os.remove` fails for a readonly file on Windows.
+        # Then, it attempts to be writable and remove.
+        if function != os.remove:
+            raise
+        e = excinfo[1]
+        if isinstance(e, OSError) and e.errno == errno.EACCES:
+            mode = os.stat(path).st_mode
+            os.chmod(path, mode | 0666)
+            function(path)
+    if os.name == 'nt':
+        # Git repository for tests has unicode characters
+        # in the path and branch names
+        path = unicode(path, 'utf-8')
+    shutil.rmtree(path, onerror=onerror)
+
+
 class EmptyTestCase(unittest.TestCase):
 
     def setUp(self):
@@ -70,9 +89,11 @@ class EmptyTestCase(unittest.TestCase):
         self.repos = setup_repository(self.env, use_dump=False)
 
     def tearDown(self):
+        self.repos.close()
+        RepositoryManager(self.env).reload_repositories()
         self.env.reset_db()
         if os.path.isdir(REPOS_PATH):
-            shutil.rmtree(REPOS_PATH)
+            rmtree(REPOS_PATH)
 
     def test_empty(self):
         if hasattr(pygit2.Repository, 'is_empty'):
@@ -160,9 +181,11 @@ class NormalTestCase(unittest.TestCase):
         self.repos = setup_repository(self.env)
 
     def tearDown(self):
+        self.repos.close()
+        RepositoryManager(self.env).reload_repositories()
         self.env.reset_db()
         if os.path.isdir(REPOS_PATH):
-            shutil.rmtree(REPOS_PATH)
+            rmtree(REPOS_PATH)
 
     def test_not_empty(self):
         if hasattr(pygit2.Repository, 'is_empty'):
