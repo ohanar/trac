@@ -33,7 +33,6 @@ from trac.versioncontrol.api import (
 from tracopt.versioncontrol.git import git_fs
 
 
-REPOS_PATH = tempfile.mkdtemp(prefix='trac-gitrepos-')
 REPOS_NAME = 'test.git'
 REPOS_URL = 'http://example.org/git/test.git'
 HEAD_REV = u'de57a54c69f156d95596aa99b0d94b348375e08d'
@@ -50,15 +49,13 @@ def spawn(*args, **kwargs):
     assert proc.returncode == 0, stderr
 
 
-def setup_repository(env, use_dump=True):
-    if os.path.isdir(REPOS_PATH):
-        rmtree(REPOS_PATH)
-    pygit2.init_repository(REPOS_PATH, True)
+def setup_repository(env, path, use_dump=True):
+    pygit2.init_repository(path, True)
     if use_dump:
         with open(dumpfile_path, 'rb') as f:
-            spawn(git_bin, '--git-dir=' + REPOS_PATH, 'fast-import', stdin=f)
+            spawn(git_bin, '--git-dir=' + path, 'fast-import', stdin=f)
     provider = DbRepositoryProvider(env)
-    provider.add_repository(REPOS_NAME, REPOS_PATH, 'git')
+    provider.add_repository(REPOS_NAME, path, 'git')
     provider.modify_repository(REPOS_NAME, {'url': REPOS_URL})
     return env.get_repository(REPOS_NAME)
 
@@ -86,14 +83,16 @@ class EmptyTestCase(unittest.TestCase):
 
     def setUp(self):
         self.env = EnvironmentStub()
-        self.repos = setup_repository(self.env, use_dump=False)
+        self.repos_path = tempfile.mkdtemp(prefix='trac-gitrepos-')
+        self.repos = setup_repository(self.env, self.repos_path,
+                                      use_dump=False)
 
     def tearDown(self):
         self.repos.close()
         RepositoryManager(self.env).reload_repositories()
         self.env.reset_db()
-        if os.path.isdir(REPOS_PATH):
-            rmtree(REPOS_PATH)
+        if os.path.isdir(self.repos_path):
+            rmtree(self.repos_path)
 
     def test_empty(self):
         if hasattr(pygit2.Repository, 'is_empty'):
@@ -178,14 +177,15 @@ class NormalTestCase(unittest.TestCase):
 
     def setUp(self):
         self.env = EnvironmentStub()
-        self.repos = setup_repository(self.env)
+        self.repos_path = tempfile.mkdtemp(prefix='trac-gitrepos-')
+        self.repos = setup_repository(self.env, self.repos_path)
 
     def tearDown(self):
         self.repos.close()
         RepositoryManager(self.env).reload_repositories()
         self.env.reset_db()
-        if os.path.isdir(REPOS_PATH):
-            rmtree(REPOS_PATH)
+        if os.path.isdir(self.repos_path):
+            rmtree(self.repos_path)
 
     def test_not_empty(self):
         if hasattr(pygit2.Repository, 'is_empty'):
@@ -229,7 +229,7 @@ class NormalTestCase(unittest.TestCase):
     def test_get_path_url_not_specified(self):
         provider = DbRepositoryProvider(self.env)
         reponame = REPOS_NAME + '.alternative'
-        provider.add_repository(reponame, REPOS_PATH, 'git')
+        provider.add_repository(reponame, self.repos_path, 'git')
         repos = self.env.get_repository(reponame)
         self.assertEquals(None, repos.get_path_url('/', None))
 
