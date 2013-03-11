@@ -58,6 +58,18 @@ __all__ = ['GitCachedRepository', 'GitCachedChangeset', 'GitConnector',
            'GitwebProjectsRepositoryProvider']
 
 
+if pygit2:
+    _DELTA_STATUS_MAP = {
+        GIT_DELTA_ADDED:    Changeset.ADD,
+        GIT_DELTA_DELETED:  Changeset.DELETE,
+        GIT_DELTA_MODIFIED: Changeset.EDIT,
+        GIT_DELTA_RENAMED:  Changeset.MOVE,
+        GIT_DELTA_COPIED:   Changeset.COPY,
+    }
+else:
+    _DELTA_STATUS_MAP = {}
+
+
 class GitCachedRepository(CachedRepository):
     """Git-specific cached repository.
 
@@ -652,14 +664,6 @@ class GitRepository(Repository):
     def get_changeset_uid(self, rev):
         return rev
 
-    _DELTA_STATUS_MAP = {
-        GIT_DELTA_ADDED:    Changeset.ADD,
-        GIT_DELTA_DELETED:  Changeset.DELETE,
-        GIT_DELTA_MODIFIED: Changeset.EDIT,
-        GIT_DELTA_RENAMED:  Changeset.MOVE,
-        GIT_DELTA_COPIED:   Changeset.COPY,
-    }
-
     def get_changes(self, old_path, old_rev, new_path, new_rev,
                     ignore_ancestry=0):
         # TODO: handle ignore_ancestry
@@ -684,7 +688,7 @@ class GitRepository(Repository):
 
         def iter_changes(diff):
             for old_file, new_file, status in sorted_files(diff):
-                action = GitRepository._DELTA_STATUS_MAP.get(status)
+                action = _DELTA_STATUS_MAP.get(status)
                 if not action:
                     continue
                 old_node = new_node = None
@@ -1037,7 +1041,7 @@ class GitChangeset(Changeset):
         files = [(normalize_path(chg[0]), normalize_path(chg[1]), chg[2])
                  for chg in files] # chg is (old, new, status[, similarity])
         for old_path, new_path, status in sorted(files, key=lambda v: v[1]):
-            action = GitRepository._DELTA_STATUS_MAP.get(status)
+            action = _DELTA_STATUS_MAP.get(status)
             if not action:
                 continue
             yield old_path, Node.FILE, action, new_path, parent_rev
