@@ -615,8 +615,7 @@ class GitRepository(Repository):
         commit = self._resolve_rev(rev, raises=False)
         if not commit:
             raise NoSuchNode(path, rev)
-        path = self.normalize_path(path)
-        return GitNode(self, path, rev)
+        return GitNode(self, self.normalize_path(path), commit)
 
     def get_quickjump_entries(self, rev):
         git_repos = self.git_repos
@@ -640,6 +639,7 @@ class GitRepository(Repository):
         return self.params.get('url')
 
     def get_changesets(self, start, stop):
+        seen_oids = set()
         def iter_commits():
             ts_start = to_timestamp(start)
             ts_stop = to_timestamp(stop)
@@ -653,9 +653,13 @@ class GitRepository(Repository):
                     if ts < ts_start:
                         break
                     if ts_start <= ts <= ts_stop:
-                        yield ts, commit
+                        oid = commit.oid
+                        if oid not in seen_oids:
+                            seen_oids.add(oid)
+                            yield ts, commit
 
-        for ts, commit in sorted(iter_commits(), key=lambda v: v[0]):
+        for ts, commit in sorted(iter_commits(), key=lambda v: v[0],
+                                 reverse=True):
             yield GitChangeset(self, commit)
 
     def get_changeset(self, rev):
@@ -703,11 +707,15 @@ class GitRepository(Repository):
         return iter_changes(diff)
 
     def previous_rev(self, rev, path=''):
-        rev = self.normalize_rev(rev)
-        path = self.normalize_path(path)
-        for commit, action in GitNode(self, path, rev)._walk_commits(rev):
+        commit = self._resolve_rev(rev)
+        if not path or path == '/':
             for parent in commit.parents:
                 return parent.hex
+        else:
+            node = GitNode(self, self.normalize_path(path), commit)
+            for commit, action in node._walk_commits(node.rev):
+                for parent in commit.parents:
+                    return parent.hex
 
     def next_rev(self, rev, path=''):
         rev = self.normalize_rev(rev)
@@ -721,6 +729,8 @@ class GitRepository(Repository):
                     continue
                 tree = commit.tree
                 entry = self._get_tree(tree, path)
+                if entry is None:
+                    return None
                 for parent in commit.parents:
                     parent_tree = parent.tree
                     if entry.oid == parent_tree.oid:
@@ -758,12 +768,7 @@ class GitRepository(Repository):
                    for c in self.git_repos.walk(oid1, GIT_SORT_TIME))
 
     def get_path_history(self, path, rev=None, limit=None):
-        def iter_nodes(node):
-            for path, rev, action in node.get_history(limit=limit):
-                yield GitNode(path, rev)
-
-        return iter_nodes(GitNode(self.normalize_path(path),
-                                  self.normalize_rev(rev)))
+        raise TracError(_("GitRepository does not support path_history"))
 
     def clear(self, youngest_rev=None):
         self._ref_walkers = None

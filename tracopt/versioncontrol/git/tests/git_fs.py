@@ -23,6 +23,7 @@ try:
 except ImportError:
     pygit2 = None
 
+from trac.core import TracError
 from trac.test import EnvironmentStub, locate
 from trac.util.compat import close_fds
 from trac.util.datefmt import utc
@@ -116,7 +117,8 @@ class EmptyTestCase(unittest.TestCase):
     def test_get_changesets(self):
         start = datetime(2001, 1, 1, tzinfo=utc)
         stop = datetime(2014, 1, 1, tzinfo=utc)
-        self.assertEquals([], list(self.repos.get_changesets(start, stop)))
+        changesets = self.repos.get_changesets(start, stop)
+        self.assertRaises(StopIteration, changesets.next)
 
     def test_has_node(self):
         self.assertEquals(False, self.repos.has_node('/', '1' * 40))
@@ -154,12 +156,8 @@ class EmptyTestCase(unittest.TestCase):
                           None, None)
         self.assertRaises(NoSuchChangeset, self.repos.rev_older_than, '', '')
 
-    def test_get_path_history_nonexistent(self):
-        self.assertRaises(NoSuchChangeset, self.repos.get_path_history, '/')
-        self.assertRaises(NoSuchChangeset, self.repos.get_path_history, '/',
-                          None)
-        self.assertRaises(NoSuchChangeset, self.repos.get_path_history, '/',
-                          '')
+    def test_get_path_history(self):
+        self.assertRaises(TracError, self.repos.get_path_history, '/')
 
     def test_normalize_rev(self):
         self.assertRaises(NoSuchChangeset, self.repos.normalize_rev, None)
@@ -233,8 +231,6 @@ class NormalTestCase(unittest.TestCase):
         repos = self.env.get_repository(reponame)
         self.assertEquals(None, repos.get_path_url('/', None))
 
-    # TODO: GitChangeset.get_properties(self):
-
     def test_get_changeset_nonexistent(self):
         self.assertEquals(HEAD_REV, self.repos.get_changeset(None).rev)
         self.assertEquals(HEAD_REV, self.repos.get_changeset('').rev)
@@ -306,7 +302,13 @@ class NormalTestCase(unittest.TestCase):
                           changes.next())
         self.assertRaises(StopIteration, changes.next)
 
-    # TODO: GitChangeset.get_branches()
+    def test_changeset_get_branches(self):
+        self.assertEquals(
+            [(u'develöp', False), ('master', False), (u'stâble', False)],
+            self.repos.get_changeset('fc398de').get_branches())
+        self.assertEquals(
+            [(u'develöp', True), ('master', True), (u'stâble', True)],
+            self.repos.get_changeset('de57a54').get_branches())
 
     def test_changeset_get_tags(self):
         self.assertEquals([u'ver0.1', u'vér0.1'],
@@ -317,7 +319,22 @@ class NormalTestCase(unittest.TestCase):
         rev = u'fc398de9939a675d6001f204c099215337d4eb24'
         self.assertEquals(rev, self.repos.get_changeset_uid(rev))
 
-    # TODO: GitRepository.get_changesets(self, start, stop)
+    def test_get_changesets(self):
+        changesets = self.repos.get_changesets(
+            datetime(2013, 2, 13, 15, 0, 0, tzinfo=utc),
+            datetime(2013, 2, 14, 15, 0, 0, tzinfo=utc))
+        self.assertEquals('fc398de9939a675d6001f204c099215337d4eb24',
+                          changesets.next().rev)
+        self.assertRaises(StopIteration, changesets.next)
+
+        changesets = self.repos.get_changesets(
+            datetime(2013, 2, 14, 14, 0, 0, tzinfo=utc),
+            datetime(2013, 2, 14, 17, 0, 0, tzinfo=utc))
+        self.assertEquals('de57a54c69f156d95596aa99b0d94b348375e08d',
+                          changesets.next().rev)
+        self.assertEquals('fc398de9939a675d6001f204c099215337d4eb24',
+                          changesets.next().rev)
+        self.assertRaises(StopIteration, changesets.next)
 
     def test_has_node(self):
         self.assertEquals(False, self.repos.has_node('/', '1' * 40))
@@ -398,8 +415,35 @@ class NormalTestCase(unittest.TestCase):
                           node.last_modified.isoformat())
         self.assertEquals({'mode': '100644'}, node.get_properties())
 
-    # TODO: GitNode.get_history(self, limit=None):
-    # TODO: GitNode.get_previous(self):
+    def test_node_get_history(self):
+        node = self.repos.get_node(u'/root-tété.txt')
+        history = node.get_history()
+        self.assertEquals((u'root-tété.txt',
+                           u'de57a54c69f156d95596aa99b0d94b348375e08d',
+                           'edit'),
+                          history.next())
+        self.assertEquals((u'root-tété.txt',
+                           u'fc398de9939a675d6001f204c099215337d4eb24',
+                           'add'),
+                          history.next())
+        self.assertRaises(StopIteration, history.next)
+
+        node = self.repos.get_node(u'/root-tété.txt')
+        history = node.get_history(1)
+        self.assertEquals((u'root-tété.txt',
+                           u'de57a54c69f156d95596aa99b0d94b348375e08d',
+                           'edit'),
+                          history.next())
+        self.assertRaises(StopIteration, history.next)
+
+        node = self.repos.get_node(u'/root-tété.txt', 'fc398de')
+        history = node.get_history()
+        self.assertEquals((u'root-tété.txt',
+                           u'fc398de9939a675d6001f204c099215337d4eb24',
+                           'add'),
+                          history.next())
+        self.assertRaises(StopIteration, history.next)
+
     # TODO: GitNode.get_annotations(self):
 
     def test_oldest_rev(self):
@@ -442,12 +486,6 @@ class NormalTestCase(unittest.TestCase):
                           'fc398de9939a675d6001f204c099215337d4eb24', '1' * 40)
         self.assertRaises(NoSuchChangeset, self.repos.rev_older_than,
                           '1' * 40, 'fc398de9939a675d6001f204c099215337d4eb24')
-
-    # TODO: GitRepository.get_path_history(self, path, rev=None, limit=None):
-
-    def test_get_path_history_nonexistent(self):
-        self.assertRaises(NoSuchChangeset, self.repos.get_path_history, '/',
-                          '1' * 40)
 
     def test_normalize_path(self):
         self.assertEquals('', self.repos.normalize_path('/'))
