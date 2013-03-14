@@ -252,19 +252,24 @@ class NormalTestCase(unittest.TestCase):
 
         changes = cset.get_changes()
         self.assertEquals((u'.gitignore', Node.FILE, Changeset.ADD,
-                           u'.gitignore', u'0' * 40),
+                           u'.gitignore',
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertEquals((u'dir/sample.txt', Node.FILE, Changeset.ADD,
-                           u'dir/sample.txt', u'0' * 40),
+                           u'dir/sample.txt',
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertEquals((u'dir/tété.txt', Node.FILE, Changeset.ADD,
-                           u'dir/tété.txt', u'0' * 40),
+                           u'dir/tété.txt',
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertEquals((u'root-tété.txt', Node.FILE, Changeset.ADD,
-                           u'root-tété.txt', u'0' * 40),
+                           u'root-tété.txt',
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertEquals((u'āāā/file.txt', Node.FILE, Changeset.ADD,
-                           u'āāā/file.txt', u'0' * 40),
+                           u'āāā/file.txt',
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertRaises(StopIteration, changes.next)
 
@@ -283,17 +288,17 @@ class NormalTestCase(unittest.TestCase):
                            u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         # Copy root-sample.txt <- dir/sample.txt
-        self.assertEquals((u'dir/sample.txt', Node.FILE, Changeset.COPY,
-                           u'root-sample.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+        self.assertEquals((u'root-sample.txt', Node.FILE, Changeset.COPY,
+                           u'dir/sample.txt',
+                           u'de57a54c69f156d95596aa99b0d94b348375e08d'),
                           changes.next())
         self.assertEquals((u'root-tété.txt', Node.FILE, Changeset.EDIT,
                            u'root-tété.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+                           u'de57a54c69f156d95596aa99b0d94b348375e08d'),
                           changes.next())
         # Rename āāā-file.txt <- āāā/file.txt
-        self.assertEquals((u'āāā/file.txt', Node.FILE, Changeset.MOVE,
-                           u'āāā-file.txt',
+        self.assertEquals((u'āāā-file.txt', Node.FILE, Changeset.MOVE,
+                           u'āāā/file.txt',
                            u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertRaises(StopIteration, changes.next)
@@ -563,7 +568,7 @@ class NormalTestCase(unittest.TestCase):
                           Changeset.COPY),
                          changes.next())
         self._cmp_change((u'root-tété.txt', u'root-tété.txt', Node.FILE,
-                           Changeset.EDIT),
+                          Changeset.EDIT),
                           changes.next())
         # Rename āāā-file.txt <- āāā/file.txt
         self._cmp_change((u'āāā/file.txt', u'āāā-file.txt', Node.FILE,

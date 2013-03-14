@@ -1102,11 +1102,15 @@ class GitChangeset(Changeset):
         if not files:
             return
 
+        commit_rev = commit.hex
         for old_path, new_path, status in files:
             action = _DELTA_STATUS_MAP.get(status)
             if not action:
                 continue
-            yield old_path, Node.FILE, action, new_path, parent_rev
+            rev = (parent_rev
+                   if status in (GIT_DELTA_DELETED, GIT_DELTA_RENAMED)
+                   else commit_rev)
+            yield new_path, Node.FILE, action, old_path, rev
 
 
 class GitwebProjectsRepositoryProvider(Component):
