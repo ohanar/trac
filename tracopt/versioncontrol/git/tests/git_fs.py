@@ -292,12 +292,8 @@ class NormalTestCase(unittest.TestCase):
                            u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         # Rename āāā-file.txt <- āāā/file.txt
-        self.assertEquals((u'āāā-file.txt', Node.FILE, Changeset.ADD,
+        self.assertEquals((u'āāā/file.txt', Node.FILE, Changeset.MOVE,
                            u'āāā-file.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
-                          changes.next())
-        self.assertEquals((u'āāā/file.txt', Node.FILE, Changeset.DELETE,
-                           u'āāā/file.txt',
                            u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertRaises(StopIteration, changes.next)
@@ -569,9 +565,8 @@ class NormalTestCase(unittest.TestCase):
                            Changeset.EDIT),
                           changes.next())
         # Rename āāā-file.txt <- āāā/file.txt
-        self._cmp_change((None, u'āāā-file.txt', Node.FILE, Changeset.ADD),
-                         changes.next())
-        self._cmp_change((u'āāā/file.txt', None, Node.FILE, Changeset.DELETE),
+        self._cmp_change((u'āāā/file.txt', u'āāā-file.txt', Node.FILE,
+                          Changeset.MOVE),
                          changes.next())
         self.assertRaises(StopIteration, changes.next)
 

@@ -528,6 +528,53 @@ class GitRepository(Repository):
                 continue
             yield self._from_fspath(name), ref, walker
 
+    def _iter_changes(self, parent_tree, commit_tree):
+        _get_tree_entry = self._get_tree_entry
+        files = []
+        added = {}
+        deleted = {}
+
+        for chg in parent_tree.diff(commit_tree).changes.get('files', ()):
+            old = chg[0]
+            new = chg[1]
+            status = chg[2]
+            if status == GIT_DELTA_ADDED:
+                entry = _get_tree_entry(commit_tree, new)
+                added.setdefault(entry.oid, []).append(new)
+            elif status == GIT_DELTA_DELETED:
+                entry = _get_tree_entry(parent_tree, old)
+                deleted.setdefault(entry.oid, []).append(old)
+            else:
+                files.append((old, new, status))
+
+        for added_paths in added.itervalues():
+            added_paths.sort()
+        for oid, deleted_paths in deleted.iteritems():
+            deleted_paths.sort()
+            if oid not in added:
+                continue
+            unused = []
+            for deleted_path in deleted_paths:
+                added_paths = added[oid]
+                if added_paths:
+                    files.append((deleted_path, added_paths[0],
+                                  GIT_DELTA_RENAMED))
+                    del added_paths[0]
+                else:
+                    unused.append(deleted_path)
+            deleted_paths[:] = unused
+
+        for added_paths in added.itervalues():
+            for path in added_paths:
+                files.append((path, path, GIT_DELTA_ADDED))
+        for deleted_paths in deleted.itervalues():
+            for path in deleted_paths:
+                files.append((path, path, GIT_DELTA_DELETED))
+
+        _from_fspath = self._from_fspath
+        return sorted((_from_fspath(old), _from_fspath(new), status)
+                      for old, new, status in files)
+
     def _get_branches(self, rev):
         return sorted((name[11:], ref.hex)
                       for name, ref, walker in self._iter_ref_walkers(rev)
@@ -672,26 +719,14 @@ class GitRepository(Repository):
                     ignore_ancestry=0):
         # TODO: handle ignore_ancestry
 
-        old_path = self.normalize_path(old_path)
-        old_commit = self._resolve_rev(old_rev)
-        old_rev = old_commit.hex
-        old_tree = self._get_tree(old_commit.tree, old_path)
-        new_path = self.normalize_path(new_path)
-        new_commit = self._resolve_rev(new_rev)
-        new_tree = self._get_tree(new_commit.tree, new_path)
-        new_rev = new_commit.hex
-        diff = old_tree.diff(new_tree)
+        def iter_changes(old_commit, old_path, new_commit, new_path):
+            old_tree = self._get_tree(old_commit.tree, old_path)
+            old_rev = old_commit.hex
+            new_tree = self._get_tree(new_commit.tree, new_path)
+            new_rev = new_commit.hex
 
-        def sorted_key(values):
-            return values[1]
-
-        def sorted_files(diff):
-            files = [(self._from_fspath(old), self._from_fspath(new), status)
-                     for old, new, status in diff.changes.get('files', ())]
-            return sorted(files, key=sorted_key)
-
-        def iter_changes(diff):
-            for old_file, new_file, status in sorted_files(diff):
+            for old_file, new_file, status in \
+                    self._iter_changes(old_tree, new_tree):
                 action = _DELTA_STATUS_MAP.get(status)
                 if not action:
                     continue
@@ -704,7 +739,10 @@ class GitRepository(Repository):
                                 posixpath.join(new_path, new_file), new_rev)
                 yield old_node, new_node, Node.FILE, action
 
-        return iter_changes(diff)
+        old_commit = self._resolve_rev(old_rev)
+        new_commit = self._resolve_rev(new_rev)
+        return iter_changes(old_commit, self.normalize_path(old_path),
+                            new_commit, self.normalize_path(new_path))
 
     def previous_rev(self, rev, path=''):
         commit = self._resolve_rev(rev)
@@ -1016,15 +1054,13 @@ class GitChangeset(Changeset):
         return properties
 
     def get_changes(self):
-        normalize_path = self.repos.normalize_path
         commit = self.commit
         files = None
-        parent_rev = commit.parents[0].hex if commit.parents else u'0' * 40
         if commit.parents:
-            for parent in commit.parents:
-                tmp = parent.tree.diff(commit.tree).changes.get('files', ())
-                tmp = set(tmp)
-                files = files & tmp if files else tmp
+            # diff for the first parent if even merge-commit
+            parent = commit.parents[0]
+            parent_rev = parent.hex
+            files = self.repos._iter_changes(parent.tree, commit.tree)
         else:
             def get_entries(tree, path=None):
                 paths = []
@@ -1039,10 +1075,12 @@ class GitChangeset(Changeset):
                 return paths
             files = [(path, path, GIT_DELTA_ADDED)
                      for path in get_entries(commit.tree)]
+            parent_rev = u'0' * 40
 
         if not files:
             return
 
+        normalize_path = self.repos.normalize_path
         files = [(normalize_path(chg[0]), normalize_path(chg[1]), chg[2])
                  for chg in files] # chg is (old, new, status[, similarity])
         for old_path, new_path, status in sorted(files, key=lambda v: v[1]):
