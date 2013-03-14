@@ -528,52 +528,72 @@ class GitRepository(Repository):
                 continue
             yield self._from_fspath(name), ref, walker
 
-    def _iter_changes(self, parent_tree, commit_tree):
+    def _get_changes(self, parent_tree, commit_tree):
         _get_tree_entry = self._get_tree_entry
         files = []
-        added = {}
-        deleted = {}
+        added_oids = {}
+        deleted_oids = {}
+        parent_oids = {}
+        diff = parent_tree.diff(commit_tree)
 
-        for chg in parent_tree.diff(commit_tree).changes.get('files', ()):
-            old = chg[0]
-            new = chg[1]
-            status = chg[2]
+        for change in diff.changes.get('files', ()):
+            old = change[0]
+            new = change[1]
+            status = change[2]
             if status == GIT_DELTA_ADDED:
                 entry = _get_tree_entry(commit_tree, new)
-                added.setdefault(entry.oid, []).append(new)
+                added_oids.setdefault(entry.oid, []).append(new)
             elif status == GIT_DELTA_DELETED:
                 entry = _get_tree_entry(parent_tree, old)
-                deleted.setdefault(entry.oid, []).append(old)
+                deleted_oids.setdefault(entry.oid, []).append(old)
             else:
                 files.append((old, new, status))
 
-        for added_paths in added.itervalues():
-            added_paths.sort()
-        for oid, deleted_paths in deleted.iteritems():
-            deleted_paths.sort()
-            if oid not in added:
-                continue
-            unused = []
-            for deleted_path in deleted_paths:
-                added_paths = added[oid]
-                if added_paths:
-                    files.append((deleted_path, added_paths[0],
-                                  GIT_DELTA_RENAMED))
-                    del added_paths[0]
-                else:
-                    unused.append(deleted_path)
-            deleted_paths[:] = unused
+        if added_oids:
+            def walk_tree(tree, path=None):
+                for entry in tree:
+                    name = posixpath.join(path, entry.name) \
+                           if path is not None else entry.name
+                    git_object = entry.to_object()
+                    if git_object.type == GIT_OBJ_TREE:
+                        for val in walk_tree(git_object, name):
+                            yield val
+                    else:
+                        yield git_object, name
+            for git_object, name in walk_tree(parent_tree):
+                parent_oids.setdefault(git_object.oid, []).append(name)
 
-        for added_paths in added.itervalues():
-            for path in added_paths:
-                files.append((path, path, GIT_DELTA_ADDED))
-        for deleted_paths in deleted.itervalues():
-            for path in deleted_paths:
-                files.append((path, path, GIT_DELTA_DELETED))
+        for oids in (added_oids, deleted_oids, parent_oids):
+            for paths in oids.itervalues():
+                paths.sort(reverse=True)
+
+        # Handle copying and renaming files
+        for oid, added_paths in added_oids.iteritems():
+            deleted_paths = deleted_oids.get(oid, ())
+            parent_paths = parent_oids.get(oid, ())
+            for idx, added_path in enumerate(reversed(added_paths)):
+                if deleted_paths:
+                    files.append((deleted_paths.pop(), added_path,
+                                  GIT_DELTA_RENAMED))
+                    continue
+                if parent_paths:
+                    files.append((parent_paths.pop(), added_path,
+                                  GIT_DELTA_COPIED))
+                    continue
+                break
+            added_paths[:] = added_paths[:-idx]
+
+        files.extend((path, path, GIT_DELTA_ADDED)
+                     for added_paths in added_oids.itervalues()
+                     for path in added_paths)
+        files.extend((path, path, GIT_DELTA_DELETED)
+                     for deleted_paths in deleted_oids.itervalues()
+                     for path in deleted_paths)
 
         _from_fspath = self._from_fspath
-        return sorted((_from_fspath(old), _from_fspath(new), status)
-                      for old, new, status in files)
+        return sorted(((_from_fspath(old), _from_fspath(new), status)
+                       for old, new, status in files),
+                      key=lambda change: change[1])
 
     def _get_branches(self, rev):
         return sorted((name[11:], ref.hex)
@@ -726,7 +746,7 @@ class GitRepository(Repository):
             new_rev = new_commit.hex
 
             for old_file, new_file, status in \
-                    self._iter_changes(old_tree, new_tree):
+                    self._get_changes(old_tree, new_tree):
                 action = _DELTA_STATUS_MAP.get(status)
                 if not action:
                     continue
@@ -1060,30 +1080,29 @@ class GitChangeset(Changeset):
             # diff for the first parent if even merge-commit
             parent = commit.parents[0]
             parent_rev = parent.hex
-            files = self.repos._iter_changes(parent.tree, commit.tree)
+            files = self.repos._get_changes(parent.tree, commit.tree)
         else:
             def get_entries(tree, path=None):
                 paths = []
                 for entry in tree:
-                    name = entry.name
-                    name = posixpath.join(path, name) if path else name
+                    name = posixpath.join(path, entry.name) \
+                           if path is not None else entry.name
                     entry = entry.to_object()
                     if entry.type == GIT_OBJ_BLOB:
                         paths.append(name)
                     elif entry.type == GIT_OBJ_TREE:
                         paths.extend(get_entries(entry, name))
                 return paths
+            _from_fspath = self.repos._from_fspath
             files = [(path, path, GIT_DELTA_ADDED)
-                     for path in get_entries(commit.tree)]
+                     for path in map(lambda p: _from_fspath(p),
+                                     get_entries(commit.tree))]
             parent_rev = u'0' * 40
 
         if not files:
             return
 
-        normalize_path = self.repos.normalize_path
-        files = [(normalize_path(chg[0]), normalize_path(chg[1]), chg[2])
-                 for chg in files] # chg is (old, new, status[, similarity])
-        for old_path, new_path, status in sorted(files, key=lambda v: v[1]):
+        for old_path, new_path, status in files:
             action = _DELTA_STATUS_MAP.get(status)
             if not action:
                 continue
