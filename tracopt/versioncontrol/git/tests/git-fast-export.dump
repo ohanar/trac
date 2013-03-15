@@ -50,28 +50,35 @@ mark :7
 data 12
 ! root file
 
-commit refs/heads/develöp
+blob
 mark :8
+data 48
+add dir2/simple.txt and dir2/simple-another.txt
+
+commit refs/heads/develöp
+mark :9
 author Joé <joe@example.com> 1360857727 +0900
 committer Joé <joe@example.com> 1360857727 +0900
 data 29
 delete, modify, rename, copy
 from :6
 D dir/tété.txt
+M 100644 :8 dir2/simple-another.txt
+M 100644 :8 dir2/simple.txt
 M 100644 :2 root-sample.txt
 M 100644 :7 root-tété.txt
 M 100644 :5 āāā-file.txt
 D āāā/file.txt
 
 reset refs/heads/master
-from :8
+from :9
 
 reset refs/tags/vér0.1
 from :6
 
 reset refs/heads/stâble
-from :8
+from :9
 
 reset refs/heads/master
-from :8
+from :9
 

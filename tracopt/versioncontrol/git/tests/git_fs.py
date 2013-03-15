@@ -36,7 +36,7 @@ from tracopt.versioncontrol.git import git_fs
 
 REPOS_NAME = 'test.git'
 REPOS_URL = 'http://example.org/git/test.git'
-HEAD_REV = u'de57a54c69f156d95596aa99b0d94b348375e08d'
+HEAD_REV = u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5'
 
 dumpfile_path = os.path.join(os.path.dirname(__file__), 'git-fast-export.dump')
 git_bin = locate('git')
@@ -168,7 +168,7 @@ class EmptyTestCase(unittest.TestCase):
 
     def test_get_changes(self):
         self.assertRaises(NoSuchChangeset, self.repos.get_changes,
-                          '/', 'fc398de', '/', 'de57a54')
+                          '/', 'fc398de', '/', '0ee9cfd')
 
 
 class NormalTestCase(unittest.TestCase):
@@ -200,13 +200,13 @@ class NormalTestCase(unittest.TestCase):
     def test_get_quickjump_entries(self):
         entries = self.repos.get_quickjump_entries(None)
         self.assertEquals(('branches', u'develöp', '/',
-                           'de57a54c69f156d95596aa99b0d94b348375e08d'),
+                           '0ee9cfd6538b7b994b94a45ed173d9d45272b0c5'),
                           entries.next())
         self.assertEquals(('branches', u'master', '/',
-                           'de57a54c69f156d95596aa99b0d94b348375e08d'),
+                           '0ee9cfd6538b7b994b94a45ed173d9d45272b0c5'),
                           entries.next())
         self.assertEquals(('branches', u'stâble', '/',
-                           'de57a54c69f156d95596aa99b0d94b348375e08d'),
+                           '0ee9cfd6538b7b994b94a45ed173d9d45272b0c5'),
                           entries.next())
         self.assertEquals(('tags', u'ver0.1', '/',
                            'fc398de9939a675d6001f204c099215337d4eb24'),
@@ -251,32 +251,27 @@ class NormalTestCase(unittest.TestCase):
         self.assertEquals(u'Joé <joe@example.com>', cset.author)
 
         changes = cset.get_changes()
-        self.assertEquals((u'.gitignore', Node.FILE, Changeset.ADD,
-                           u'.gitignore',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+        self.assertEquals((u'.gitignore', Node.FILE, Changeset.ADD, None,
+                           None),
                           changes.next())
-        self.assertEquals((u'dir/sample.txt', Node.FILE, Changeset.ADD,
-                           u'dir/sample.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+        self.assertEquals((u'dir/sample.txt', Node.FILE, Changeset.ADD, None,
+                           None),
                           changes.next())
-        self.assertEquals((u'dir/tété.txt', Node.FILE, Changeset.ADD,
-                           u'dir/tété.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+        self.assertEquals((u'dir/tété.txt', Node.FILE, Changeset.ADD, None,
+                           None),
                           changes.next())
-        self.assertEquals((u'root-tété.txt', Node.FILE, Changeset.ADD,
-                           u'root-tété.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+        self.assertEquals((u'root-tété.txt', Node.FILE, Changeset.ADD, None,
+                           None),
                           changes.next())
-        self.assertEquals((u'āāā/file.txt', Node.FILE, Changeset.ADD,
-                           u'āāā/file.txt',
-                           u'fc398de9939a675d6001f204c099215337d4eb24'),
+        self.assertEquals((u'āāā/file.txt', Node.FILE, Changeset.ADD, None,
+                           None),
                           changes.next())
         self.assertRaises(StopIteration, changes.next)
 
     def test_changeset_others(self):
-        cset = self.repos.get_changeset('de57a54')
+        cset = self.repos.get_changeset('0ee9cfd')
         self.assert_(isinstance(cset, Changeset), repr(cset))
-        self.assertEquals(u'de57a54c69f156d95596aa99b0d94b348375e08d',
+        self.assertEquals(u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                           cset.rev)
         self.assertEquals('2013-02-15T01:02:07+09:00', cset.date.isoformat())
         self.assertEquals(u'delete, modify, rename, copy\n', cset.message)
@@ -287,14 +282,20 @@ class NormalTestCase(unittest.TestCase):
                            u'dir/tété.txt',
                            u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
+        self.assertEquals((u'dir2/simple-another.txt', Node.FILE,
+                           Changeset.ADD, None, None),
+                          changes.next())
+        self.assertEquals((u'dir2/simple.txt', Node.FILE, Changeset.ADD,
+                           None, None),
+                          changes.next())
         # Copy root-sample.txt <- dir/sample.txt
         self.assertEquals((u'root-sample.txt', Node.FILE, Changeset.COPY,
                            u'dir/sample.txt',
-                           u'de57a54c69f156d95596aa99b0d94b348375e08d'),
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         self.assertEquals((u'root-tété.txt', Node.FILE, Changeset.EDIT,
                            u'root-tété.txt',
-                           u'de57a54c69f156d95596aa99b0d94b348375e08d'),
+                           u'fc398de9939a675d6001f204c099215337d4eb24'),
                           changes.next())
         # Rename āāā-file.txt <- āāā/file.txt
         self.assertEquals((u'āāā-file.txt', Node.FILE, Changeset.MOVE,
@@ -309,12 +310,12 @@ class NormalTestCase(unittest.TestCase):
             self.repos.get_changeset('fc398de').get_branches())
         self.assertEquals(
             [(u'develöp', True), ('master', True), (u'stâble', True)],
-            self.repos.get_changeset('de57a54').get_branches())
+            self.repos.get_changeset('0ee9cfd').get_branches())
 
     def test_changeset_get_tags(self):
         self.assertEquals([u'ver0.1', u'vér0.1'],
                           self.repos.get_changeset('fc398de').get_tags())
-        self.assertEquals([], self.repos.get_changeset('de57a54').get_tags())
+        self.assertEquals([], self.repos.get_changeset('0ee9cfd').get_tags())
 
     def test_get_changeset_uid(self):
         rev = u'fc398de9939a675d6001f204c099215337d4eb24'
@@ -331,7 +332,7 @@ class NormalTestCase(unittest.TestCase):
         changesets = self.repos.get_changesets(
             datetime(2013, 2, 14, 14, 0, 0, tzinfo=utc),
             datetime(2013, 2, 14, 17, 0, 0, tzinfo=utc))
-        self.assertEquals('de57a54c69f156d95596aa99b0d94b348375e08d',
+        self.assertEquals('0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                           changesets.next().rev)
         self.assertEquals('fc398de9939a675d6001f204c099215337d4eb24',
                           changesets.next().rev)
@@ -340,13 +341,13 @@ class NormalTestCase(unittest.TestCase):
     def test_has_node(self):
         self.assertEquals(False, self.repos.has_node('/', '1' * 40))
         self.assertEquals(True, self.repos.has_node('/'))
-        self.assertEquals(True, self.repos.has_node('/', 'de57a54'))
+        self.assertEquals(True, self.repos.has_node('/', '0ee9cfd'))
         self.assertEquals(True, self.repos.has_node('/'))
         self.assertEquals(True, self.repos.has_node('/.gitignore', 'fc398de'))
 
     def test_get_node_nonexistent(self):
         self.assertRaises(NoSuchNode, self.repos.get_node, u'/āāā/file.txt',
-                          'de57a54')
+                          '0ee9cfd')
 
     def test_get_node_directory(self):
         node = self.repos.get_node(u'/dir', 'fc398de')
@@ -367,23 +368,24 @@ class NormalTestCase(unittest.TestCase):
         self.assertEquals(u'dir/tété.txt', entries.next().path)
         self.assertRaises(StopIteration, entries.next)
 
-        node = self.repos.get_node(u'/', 'de57a54')
+        node = self.repos.get_node(u'/', '0ee9cfd')
         self.assertEquals(Node.DIRECTORY, node.kind)
         self.assertEquals({}, node.get_properties())
         entries = node.get_entries()
         self.assertEquals(u'.gitignore', entries.next().path)
         self.assertEquals(u'dir', entries.next().path)
+        self.assertEquals(u'dir2', entries.next().path)
         self.assertEquals(u'root-sample.txt', entries.next().path)
         self.assertEquals(u'root-tété.txt', entries.next().path)
         self.assertEquals(u'āāā-file.txt', entries.next().path)
         self.assertRaises(StopIteration, entries.next)
 
     def test_get_node_file(self):
-        node = self.repos.get_node(u'/dir/sample.txt', 'de57a54')
+        node = self.repos.get_node(u'/dir/sample.txt', '0ee9cfd')
         self.assertEquals(u'sample.txt', node.name)
         self.assertEquals(u'dir/sample.txt', node.path)
         self.assertEquals(Node.FILE, node.kind)
-        self.assertEquals(u'de57a54c69f156d95596aa99b0d94b348375e08d',
+        self.assertEquals(u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                           node.rev)
         self.assertEquals(u'fc398de9939a675d6001f204c099215337d4eb24',
                           node.created_rev)
@@ -397,13 +399,13 @@ class NormalTestCase(unittest.TestCase):
                           node.last_modified.isoformat())
         self.assertEquals({'mode': '100644'}, node.get_properties())
 
-        node = self.repos.get_node(u'/āāā-file.txt', 'de57a54')
+        node = self.repos.get_node(u'/āāā-file.txt', '0ee9cfd')
         self.assertEquals(u'āāā-file.txt', node.name)
         self.assertEquals(u'āāā-file.txt', node.path)
         self.assertEquals(Node.FILE, node.kind)
-        self.assertEquals(u'de57a54c69f156d95596aa99b0d94b348375e08d',
+        self.assertEquals(u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                           node.rev)
-        self.assertEquals(u'de57a54c69f156d95596aa99b0d94b348375e08d',
+        self.assertEquals(u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                           node.created_rev)
         self.assertRaises(StopIteration, node.get_entries().next)
         self.assertEquals('', node.content_type)
@@ -420,7 +422,7 @@ class NormalTestCase(unittest.TestCase):
         node = self.repos.get_node(u'/root-tété.txt')
         history = node.get_history()
         self.assertEquals((u'root-tété.txt',
-                           u'de57a54c69f156d95596aa99b0d94b348375e08d',
+                           u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                            'edit'),
                           history.next())
         self.assertEquals((u'root-tété.txt',
@@ -432,7 +434,7 @@ class NormalTestCase(unittest.TestCase):
         node = self.repos.get_node(u'/root-tété.txt')
         history = node.get_history(1)
         self.assertEquals((u'root-tété.txt',
-                           u'de57a54c69f156d95596aa99b0d94b348375e08d',
+                           u'0ee9cfd6538b7b994b94a45ed173d9d45272b0c5',
                            'edit'),
                           history.next())
         self.assertRaises(StopIteration, history.next)
@@ -560,8 +562,13 @@ class NormalTestCase(unittest.TestCase):
                                      change[2], change[3]))
 
     def test_get_changes_different_revs(self):
-        changes = self.repos.get_changes('/', 'fc398de', '/', 'de57a54')
+        changes = self.repos.get_changes('/', 'fc398de', '/', '0ee9cfd')
         self._cmp_change((u'dir/tété.txt', None, Node.FILE, Changeset.DELETE),
+                         changes.next())
+        self._cmp_change((None, u'dir2/simple-another.txt', Node.FILE,
+                          Changeset.ADD),
+                         changes.next())
+        self._cmp_change((None, u'dir2/simple.txt', Node.FILE, Changeset.ADD),
                          changes.next())
         # Copy root-sample.txt <- dir/sample.txt
         self._cmp_change((u'dir/sample.txt', u'root-sample.txt', Node.FILE,

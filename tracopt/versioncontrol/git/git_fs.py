@@ -128,6 +128,18 @@ def _format_signature(signature):
     return ('%s <%s>' % (name, email)).strip()
 
 
+def _walk_tree(tree, path=None):
+    for entry in tree:
+        name = posixpath.join(path, entry.name) \
+               if path is not None else entry.name
+        git_object = entry.to_object()
+        if git_object.type == GIT_OBJ_TREE:
+            for val in _walk_tree(git_object, name):
+                yield val
+        else:
+            yield git_object, name
+
+
 class _cached_walker(object):
 
     __slots__ = ['walker', 'revs', 'commits']
@@ -550,17 +562,7 @@ class GitRepository(Repository):
                 files.append((old, new, status))
 
         if added_oids:
-            def walk_tree(tree, path=None):
-                for entry in tree:
-                    name = posixpath.join(path, entry.name) \
-                           if path is not None else entry.name
-                    git_object = entry.to_object()
-                    if git_object.type == GIT_OBJ_TREE:
-                        for val in walk_tree(git_object, name):
-                            yield val
-                    else:
-                        yield git_object, name
-            for git_object, name in walk_tree(parent_tree):
+            for git_object, name in _walk_tree(parent_tree):
                 parent_oids.setdefault(git_object.oid, []).append(name)
 
         for oids in (added_oids, deleted_oids, parent_oids):
@@ -571,17 +573,17 @@ class GitRepository(Repository):
         for oid, added_paths in added_oids.iteritems():
             deleted_paths = deleted_oids.get(oid, ())
             parent_paths = parent_oids.get(oid, ())
-            for idx, added_path in enumerate(reversed(added_paths)):
+            while added_paths:
+                added_path = added_paths[-1]
                 if deleted_paths:
                     files.append((deleted_paths.pop(), added_path,
                                   GIT_DELTA_RENAMED))
-                    continue
-                if parent_paths:
+                elif parent_paths:
                     files.append((parent_paths.pop(), added_path,
                                   GIT_DELTA_COPIED))
-                    continue
-                break
-            added_paths[:] = added_paths[:-idx]
+                else:
+                    break
+                added_paths.pop()
 
         files.extend((path, path, GIT_DELTA_ADDED)
                      for added_paths in added_oids.itervalues()
@@ -1075,42 +1077,26 @@ class GitChangeset(Changeset):
 
     def get_changes(self):
         commit = self.commit
-        files = None
         if commit.parents:
             # diff for the first parent if even merge-commit
             parent = commit.parents[0]
             parent_rev = parent.hex
             files = self.repos._get_changes(parent.tree, commit.tree)
         else:
-            def get_entries(tree, path=None):
-                paths = []
-                for entry in tree:
-                    name = posixpath.join(path, entry.name) \
-                           if path is not None else entry.name
-                    entry = entry.to_object()
-                    if entry.type == GIT_OBJ_BLOB:
-                        paths.append(name)
-                    elif entry.type == GIT_OBJ_TREE:
-                        paths.extend(get_entries(entry, name))
-                return paths
             _from_fspath = self.repos._from_fspath
-            files = [(path, path, GIT_DELTA_ADDED)
-                     for path in map(lambda p: _from_fspath(p),
-                                     get_entries(commit.tree))]
-            parent_rev = u'0' * 40
+            files = sorted(((None, _from_fspath(name), GIT_DELTA_ADDED)
+                            for git_object, name in _walk_tree(commit.tree)),
+                           key=lambda change: change[1])
+            parent_rev = None
 
-        if not files:
-            return
-
-        commit_rev = commit.hex
         for old_path, new_path, status in files:
             action = _DELTA_STATUS_MAP.get(status)
             if not action:
                 continue
-            rev = (parent_rev
-                   if status in (GIT_DELTA_DELETED, GIT_DELTA_RENAMED)
-                   else commit_rev)
-            yield new_path, Node.FILE, action, old_path, rev
+            if status == GIT_DELTA_ADDED:
+                yield new_path, Node.FILE, action, None, None
+            else:
+                yield new_path, Node.FILE, action, old_path, parent_rev
 
 
 class GitwebProjectsRepositoryProvider(Component):
