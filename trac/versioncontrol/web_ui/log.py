@@ -134,7 +134,7 @@ class LogModule(Component):
                 for (a, b) in ranges:
                     a = repos.normalize_rev(a)
                     b = repos.normalize_rev(b)
-                    while not repos.rev_older_than(b, a):
+                    while not repos.rev_older_than(b, a) and b != a:
                         node = get_existing_node(req, repos, prevpath, b)
                         node_history = list(node.get_history(2))
                         p, rev, chg = node_history[0]
