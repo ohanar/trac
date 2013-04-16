@@ -1,0 +1,84 @@
+blob
+mark :1
+data 9
+*~
+*.tmp
+
+blob
+mark :2
+data 465
+> Lorem ipsum dolor sit amet, consectetur adipisicing elit,
+| sed do eiusmod tempor incididunt ut labore et dolore
+| magna aliqua. Ut enim ad minim veniam, quis nostrud
+| exercitation ullamco laboris nisi ut aliquip ex ea
+| commodo consequat. Duis aute irure dolor in reprehenderit
+| in voluptate velit esse cillum dolore eu fugiat nulla
+| pariatur. Excepteur sint occaecat cupidatat non proident,
+| sunt in culpa qui officia deserunt mollit anim id est
+| laborum.
+
+blob
+mark :3
+data 17
+unicode filename
+
+blob
+mark :4
+data 10
+root file
+
+blob
+mark :5
+data 37
+The directory has unicode characters
+
+reset refs/tags/ver0.1
+commit refs/tags/ver0.1
+mark :6
+author Joé <joe@example.com> 1360850485 +0900
+committer Joé <joe@example.com> 1360850485 +0900
+data 15
+Add some files
+M 100644 :1 .gitignore
+M 100644 :2 dir/sample.txt
+M 100644 :3 dir/tété.txt
+M 100644 :4 root-tété.txt
+M 100644 :5 āāā/file.txt
+
+blob
+mark :7
+data 12
+! root file
+
+blob
+mark :8
+data 48
+add dir2/simple.txt and dir2/simple-another.txt
+
+commit refs/heads/develöp
+mark :9
+author Joé <joe@example.com> 1360857727 +0900
+committer Joé <joe@example.com> 1360857727 +0900
+data 29
+delete, modify, rename, copy
+from :6
+D dir/tété.txt
+M 100644 :8 dir2/simple-another.txt
+M 100644 :8 dir2/simple.txt
+M 100644 :2 root-sample.txt
+M 100644 :7 root-tété.txt
+M 100644 :5 āāā-file.txt
+D āāā/file.txt
+
+reset refs/heads/master
+from :9
+
+reset refs/tags/vér0.1
+from :6
+
+reset refs/heads/stâble
+from :9
+
+reset refs/heads/master
+from :9
+
