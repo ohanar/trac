@@ -668,15 +668,15 @@ class GitRepository(Repository):
     def short_rev(self, rev):
         rev = self.normalize_rev(rev)
         git_repos = self.git_repos
-        for size in xrange(self.shortrev_len, 40):
+        for size in xrange(self.shortrev_len, 41):
             short_rev = rev[:size]
             try:
                 git_object = git_repos[short_rev]
                 if git_object.type == GIT_OBJ_COMMIT:
                     return short_rev
-            except KeyError:
+            except ValueError:
                 pass
-        assert size == 40
+        raise TracError("was not able to find rev %s"%rev)
 
     display_rev = short_rev
 
