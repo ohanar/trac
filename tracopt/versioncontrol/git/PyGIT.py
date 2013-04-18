@@ -439,6 +439,7 @@ class Storage(object):
                 head_revs = set(v for _, v in new_branches)
 
                 rev = ord_rev = 0
+                youngest = __rev_reuse(self.repo.rev_parse('HEAD').strip())
                 for ord_rev, revs in enumerate(
                                         self.repo.rev_list('--parents',
                                                            '--topo-order',
@@ -447,10 +448,6 @@ class Storage(object):
                     revs = map(__rev_reuse, revs.strip().split())
 
                     rev = revs[0]
-
-                    # first rev seen is assumed to be the youngest one
-                    if not ord_rev:
-                        youngest = rev
 
                     # shortrev "hash" map
                     srev_key = self.__rev_key(rev)
