@@ -828,8 +828,8 @@ class Storage(object):
         work_list = deque()
         seen = set()
 
-        seen.update(rev_dict[sha][0])
-        work_list.extend(rev_dict[sha][0])
+        seen.update([sha])
+        work_list.extend([sha])
 
         while work_list:
             p = work_list.popleft()
