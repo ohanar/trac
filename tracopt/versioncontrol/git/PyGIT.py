@@ -916,7 +916,8 @@ class Storage(object):
         if limit is None:
             limit = -1
 
-        tmp = self.repo.rev_list('--max-count=%d' % limit, str(sha), '--',
+        tmp = self.repo.rev_list('--max-count=%d' % limit, '--first-parent',
+                                 str(sha), '--',
                                  self._fs_from_unicode(path))
 
         return [ rev.strip() for rev in tmp.splitlines() ]
