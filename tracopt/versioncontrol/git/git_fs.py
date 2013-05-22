@@ -418,8 +418,31 @@ class GitRepository(Repository):
 
     def get_quickjump_entries(self, rev):
         for bname, bsha in self.git.get_branches():
-            yield 'branches', bname, '/', bsha
-        for t in self.git.get_tags():
+            if '/' not in bname:
+                yield 'branches', bname, '/', bsha
+        def parse(s):
+            for i,p in enumerate((u'pre',u'alpha',u'beta',u'rc')):
+                if s.startswith(p):
+                    if len(s) > len(p):
+                        return i, int(s[len(p):])
+                    else:
+                        return i, -1
+            return 10, int(s)
+        def tag_cmp(a, b):
+            if a == b:
+                return 0
+            a = a.split('.')
+            b = b.split('.')
+            while a and b:
+                c = cmp(parse(b.pop(0)), parse(a.pop(0)))
+                if c:
+                    return c
+            if a:
+                return cmp(9, parse(a.pop(0))[0])
+            else:
+                return cmp(parse(b.pop(0))[0], 9)
+        tags = sorted(self.git.get_tags(), tag_cmp)
+        for t in tags:
             yield 'tags', t, '/', t
 
     def get_path_url(self, path, rev):
