@@ -700,11 +700,6 @@ class GitChangeset(Changeset):
             properties['git-committer'] = _parse_user_time(committer)
             properties['git-author'] = _parse_user_time(author)
 
-        branches = list(self.repos.git.get_branch_contains(self.rev,
-                                                           resolve=True))
-        if branches:
-            properties['Branches'] = branches
-
         return properties
 
     def get_changes(self):

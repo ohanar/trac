@@ -998,12 +998,9 @@ class ChangesetModule(Component):
         if field == 'title':
             labels = []
             for name, head in cset.get_branches():
-                if not head and name in ('default', 'master'):
+                if not head:
                     continue
-                class_ = 'branch'
-                if head:
-                    class_ += ' head'
-                labels.append(tag.span(name, class_=class_))
+                labels.append(tag.span(name, class_='branch head'))
             for name in cset.get_tags():
                 labels.append(tag.span(name, class_='tag'))
             return title if not labels else tag(title, labels)
