@@ -563,19 +563,27 @@ class ChangesetModule(Component):
             files.
             """
             mview = Mimeview(self.env)
-            if mview.is_binary(old_node.content_type, old_node.path):
-                return None
-            if mview.is_binary(new_node.content_type, new_node.path):
-                return None
-            old_content = old_node.get_content().read()
-            if mview.is_binary(content=old_content):
-                return None
-            new_content = new_node.get_content().read()
-            if mview.is_binary(content=new_content):
-                return None
+            if old_node:
+                if mview.is_binary(old_node.content_type, old_node.path):
+                    return None
+                old_content = old_node.get_content().read()
+                if mview.is_binary(content=old_content):
+                    return None
+            if new_node:
+                if mview.is_binary(new_node.content_type, new_node.path):
+                    return None
+                new_content = new_node.get_content().read()
+                if mview.is_binary(content=new_content):
+                    return None
 
-            old_content = mview.to_unicode(old_content, old_node.content_type)
-            new_content = mview.to_unicode(new_content, new_node.content_type)
+            if old_node:
+                old_content = mview.to_unicode(old_content, old_node.content_type)
+            else:
+                old_content = u''
+            if new_node:
+                new_content = mview.to_unicode(new_content, new_node.content_type)
+            else:
+                new_content = u''
 
             if old_content != new_content:
                 context = options.get('contextlines', 3)
@@ -598,11 +606,18 @@ class ChangesetModule(Component):
         diff_bytes = diff_files = 0
         if self.max_diff_bytes or self.max_diff_files:
             for old_node, new_node, kind, change in get_changes():
-                if change in Changeset.DIFF_CHANGES and kind == Node.FILE \
-                        and old_node.is_viewable(req.perm) \
-                        and new_node.is_viewable(req.perm):
+                if kind == Node.FILE:
                     diff_files += 1
-                    diff_bytes += _estimate_changes(old_node, new_node)
+                    if (change in Changeset.DIFF_CHANGES
+                            and old_node.is_viewable(req.perm)
+                            and new_node.is_viewable(req.perm)):
+                        diff_bytes += _estimate_changes(old_node, new_node)
+                    elif (change is Changeset.ADD
+                            and new_node.is_viewable(req.perm)):
+                        diff_bytes += new_node.get_content_length()
+                    elif (change is Changeset.DELETE
+                            and old_node.is_viewable(req.perm)):
+                        diff_bytes += old_node.get_content_length()
         show_diffs = (not self.max_diff_files or \
                       0 < diff_files <= self.max_diff_files) and \
                      (not self.max_diff_bytes or \
@@ -631,15 +646,23 @@ class ChangesetModule(Component):
             if change in Changeset.DIFF_CHANGES and show_old and show_new:
                 assert old_node and new_node
                 props = _prop_changes(old_node, new_node)
-                if props:
+            elif change is Changeset.ADD and show_new:
+                assert new_node
+                props = new_node.get_properties()
+                ctx = web_context(req, new_node.resource)
+                props = [{'name': k, 'old': None, 'new': browser.render_property(k, 'changeset', ctx, props)} for k in props]
+
+            if props:
+                show_entry = True
+            if kind == Node.FILE and show_diff and (show_old or show_new):
+                assert old_node or new_node
+                diffs = _content_changes(old_node, new_node)
+                if diffs != []:
+                    if diffs:
+                        has_diffs = True
+                    # elif None (means: manually compare to (previous))
                     show_entry = True
-                if kind == Node.FILE and show_diff:
-                    diffs = _content_changes(old_node, new_node)
-                    if diffs != []:
-                        if diffs:
-                            has_diffs = True
-                        # elif None (means: manually compare to (previous))
-                        show_entry = True
+
             if (show_old or show_new) and (show_entry or not show_diff):
                 info = {'change': change,
                         'old': old_node and node_info(old_node, annotated),

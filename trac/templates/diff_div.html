@@ -42,7 +42,7 @@
       class="diff">
 
   <ul py:if="any(item.diffs or item.props for item in changes)" class="entries">
-    <py:for each="idx, item in enumerate(changes)" py:with="old = item.old; new = item.new">
+    <py:for each="idx, item in enumerate(changes)" py:with="old = item.old or {}; new = item.new or {}">
       <li py:if="item and (item.diffs or item.props or 'comments' in item)" class="entry"
           py:with="comments = item.get('comments')">
         <h2 id="${'file%s' % idx if not no_id else None}" py:choose="">
