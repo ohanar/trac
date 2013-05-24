@@ -215,11 +215,12 @@ class ChangesetModule(Component):
         req.perm.require('CHANGESET_VIEW')
 
         # -- retrieve arguments
-        full_new_path = new_path = req.args.get('new_path')
         new = req.args.get('new')
-        full_old_path = old_path = req.args.get('old_path')
+        full_new_path = new_path = req.args.get('new_path')
         old = req.args.get('old')
+        full_old_path = old_path = req.args.get('old_path')
         reponame = req.args.get('reponame')
+        base = req.args.get('base')
 
         xhr = req.get_header('X-Requested-With') == 'XMLHttpRequest'
 
@@ -289,7 +290,7 @@ class ChangesetModule(Component):
                                                     contextall=contextall))
             else:
                 req.redirect(req.href.changeset(new, reponame,
-                                                new_path, old=old,
+                                                new_path, old=old, base=base,
                                                 old_path=full_old_path,
                                                 contextall=contextall))
 
@@ -301,7 +302,8 @@ class ChangesetModule(Component):
             else:
                 prev_path, prev_rev = new_path, repos.previous_rev(new)
             data = {'old_path': prev_path, 'old_rev': prev_rev,
-                    'new_path': new_path, 'new_rev': new}
+                    'new_path': new_path, 'new_rev': new,
+                    'base_rev': base}
         else:
             if not new:
                 new = repos.youngest_rev
@@ -310,7 +312,9 @@ class ChangesetModule(Component):
             if old_path is None:
                 old_path = new_path
             data = {'old_path': old_path, 'old_rev': old,
-                    'new_path': new_path, 'new_rev': new}
+                    'new_path': new_path, 'new_rev': new,
+                    'base_rev': base}
+
         data.update({'repos': repos, 'reponame': repos.reponame or None,
                      'diff': diff_data,
                      'wiki_format_messages': self.wiki_format_messages})
@@ -471,6 +475,19 @@ class ChangesetModule(Component):
                 if next_rev:
                     add_link(req, 'next', next_href,
                              _changeset_title(next_rev))
+        elif data['base_rev']:
+            old_rev = data['old_rev']
+            new_rev = data['new_rev']
+            base_rev = data['base_rev']
+            title = _('Diff of %(old_rev)s to %(new_rev)s via %(base_rev)s',
+                     old_rev=repos.display_rev(old_rev) or latest,
+                     new_rev=repos.display_rev(new_rev) or latest,
+                     base_rev=repos.display_rev(base_rev) or latest)
+
+            def get_changes():
+                for d in repos.three_way_diff(base_rev, old_rev, new_rev):
+                    yield d
+            data['changeset'] = False
         else: # Diff Mode
             # -- getting the change summary from the Repository.get_changes
             def get_changes():

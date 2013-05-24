@@ -29,6 +29,8 @@
           old_href = href.browser(reponame, old_path, rev=old_rev);
           old_drev = display_rev(old_rev);
           new_drev = display_rev(new_rev);
+          base_drev = display_rev(base_rev);
+          base_href = href.browser(reponame, rev=base_rev);
             ">
         <py:when test="reponame">
           <py:choose>
@@ -58,6 +60,9 @@
               Changeset <a title="Show full changeset" href="$cset_href">$new_drev</a>
               for <a title="Show entry in browser" href="$new_href">$new_path</a>
             </h1>
+            <h1 py:when="not changeset and restricted and base_rev" i18n:msg="old_rev, new_rev, base_rev">
+              Diff of <a href="$old_href">$old_drev</a> to <a href="$new_href">$new_drev</a> via <a href="$base_href">$base_drev</a>
+            </h1>
             <h1 py:when="not changeset and restricted" i18n:msg="new_path, old_rev, new_rev">
               Changes in <a title="Show entry in browser" href="$new_href">$new_path</a>
               <a title="Show revision log" href="$log_href">[$old_drev:$new_drev]</a>
@@ -85,6 +90,7 @@
             <input type="hidden" name="new_path" value="${'/' + pathjoin(reponame, new_path)}" />
             <input type="hidden" name="old" value="$old_rev" />
             <input type="hidden" name="new" value="$new_rev" />
+            <input type="hidden" name="base" value="$base_rev" />
           </py:if>
           <xi:include href="diff_options.html" />
         </div>
