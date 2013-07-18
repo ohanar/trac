@@ -462,95 +462,99 @@ class GitRepository(Repository):
         return self.normalize_rev(rev)
 
     def three_way_diff(self, base_rev, old_rev, new_rev):
-        merge_tree = self.git.repo.merge_tree(base_rev, old_rev, new_rev).splitlines()
-        class MergeNode(Node):
-            def __init__(this, content, mode, *args, **kwds):
-                this.__content = content
-                this.__mode = mode
-                Node.__init__(this, *args, **kwds)
-            def get_content(this):
-                return this.__content
-            def get_entries(this):
-                return
-            def get_history(this, limit=None):
-                return
-            def get_annotations(this):
-                return
-            def get_properties(this):
-                return this.__mode and {'mode': this.__mode}
-            def get_content_length(this):
-                return sys.getsizeof(this.get_content())
-            def get_content_type(this):
-                return ''
-            def get_last_modified(this):
-                return
-        while merge_tree:
-            type = merge_tree.pop(0)
-            block = []
-            while merge_tree and not merge_tree[0][0].isalpha():
-                block.append(merge_tree.pop(0))
+        if base_rev == old_rev:
+            for change in self.get_changes('/',old_rev,'/',new_rev):
+                yield change
+        else:
+            merge_tree = self.git.repo.merge_tree(base_rev, old_rev, new_rev).splitlines()
+            class MergeNode(Node):
+                def __init__(this, content, mode, *args, **kwds):
+                    this.__content = content
+                    this.__mode = mode
+                    Node.__init__(this, *args, **kwds)
+                def get_content(this):
+                    return this.__content
+                def get_entries(this):
+                    return
+                def get_history(this, limit=None):
+                    return
+                def get_annotations(this):
+                    return
+                def get_properties(this):
+                    return this.__mode and {'mode': this.__mode}
+                def get_content_length(this):
+                    return sys.getsizeof(this.get_content())
+                def get_content_type(this):
+                    return ''
+                def get_last_modified(this):
+                    return
+            while merge_tree:
+                type = merge_tree.pop(0)
+                block = []
+                while merge_tree and not merge_tree[0][0].isalpha():
+                    block.append(merge_tree.pop(0))
 
-            path = block[0].split()[-1]
+                path = block[0].split()[-1]
 
-            if type in ('merged', 'changed in both'):
-                change = Changeset.EDIT
-                old_node = self.get_node(path, old_rev)
-                content = None
-                while block and block[0].startswith(' '):
-                    line = [s for s in block.pop(0).split() if s]
-                    if line[0] == 'result':
-                        content = self.git.repo.cat_file('blob', line[2])
-                        mode = line[1]
-                    elif line[0] == 'our':
-                        old = self.git.repo.cat_file('blob', line[2]).splitlines()
-                    elif line[0] == 'their':
-                        mode = line[1]
+                if type in ('merged', 'changed in both'):
+                    change = Changeset.EDIT
+                    old_node = self.get_node(path, old_rev)
+                    content = None
+                    while block and block[0].startswith(' '):
+                        line = [s for s in block.pop(0).split() if s]
+                        if line[0] == 'result':
+                            content = self.git.repo.cat_file('blob', line[2])
+                            mode = line[1]
+                        elif line[0] == 'our':
+                            old = self.git.repo.cat_file('blob', line[2]).splitlines()
+                        elif line[0] == 'their':
+                            mode = line[1]
 
-                if content is None:
-                    # must apply patch in this case
-                    content = list(old)
-                    while block:
-                        line = block.pop(0)
-                        a,b = line.strip('@').strip().split()
-                        old_start,old_len = map(int, a[1:].split(','))
-                        new_start,new_len = map(int, b[1:].split(','))
-                        old_start -= 1; new_start -= 1
-                        i,j = old_start, new_start
-                        while block and not block[0].startswith('@'):
+                    if content is None:
+                        # must apply patch in this case
+                        content = list(old)
+                        while block:
                             line = block.pop(0)
-                            s, line = line[0], line[1:]
-                            if s == ' ':
-                                if line == old[i] and line == content[j]:
-                                    i += 1; j += 1
-                                else:
-                                    raise RuntimeError
-                            elif s == '+':
-                                content.insert(j, line)
-                                j += 1
-                            elif s == '-':
-                                if line == old[i]:
-                                    content.pop(j)
-                                    i += 1
-                                else:
-                                    raise RuntimeError
-                        if i-old_start != old_len or j-new_start != new_len:
-                            raise RuntimeError
-                    content = '\n'.join(content)+'\n'
+                            a,b = line.strip('@').strip().split()
+                            old_start,old_len = map(int, a[1:].split(','))
+                            new_start,new_len = map(int, b[1:].split(','))
+                            old_start -= 1; new_start -= 1
+                            i,j = old_start, new_start
+                            while block and not block[0].startswith('@'):
+                                line = block.pop(0)
+                                s, line = line[0], line[1:]
+                                if s == ' ':
+                                    if line == old[i] and line == content[j]:
+                                        i += 1; j += 1
+                                    else:
+                                        raise RuntimeError
+                                elif s == '+':
+                                    content.insert(j, line)
+                                    j += 1
+                                elif s == '-':
+                                    if line == old[i]:
+                                        content.pop(j)
+                                        i += 1
+                                    else:
+                                        raise RuntimeError
+                            if i-old_start != old_len or j-new_start != new_len:
+                                raise RuntimeError
+                        content = '\n'.join(content)+'\n'
 
-                content = cStringIO.StringIO(content)
-                new_node = MergeNode(content, mode, self, path, new_rev, Node.FILE)
-            elif type == 'added in remote':
-                change = Changeset.ADD
-                old_node = None
-                new_node = self.get_node(path, new_rev)
-            elif type == 'removed in remote':
-                change = Changeset.DELETE
-                old_node = self.get_node(path, old_rev)
-                new_node = None
-            else:
-                continue
+                    content = cStringIO.StringIO(content)
+                    new_node = MergeNode(content, mode, self, path, new_rev, Node.FILE)
+                elif type == 'added in remote':
+                    change = Changeset.ADD
+                    old_node = None
+                    new_node = self.get_node(path, new_rev)
+                elif type == 'removed in remote':
+                    change = Changeset.DELETE
+                    old_node = self.get_node(path, old_rev)
+                    new_node = None
+                else:
+                    continue
 
-            yield old_node, new_node, Node.FILE, change
+                yield old_node, new_node, Node.FILE, change
 
     def get_changes(self, old_path, old_rev, new_path, new_rev,
                     ignore_ancestry=0):
