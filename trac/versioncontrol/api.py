@@ -250,9 +250,18 @@ class DbRepositoryProvider(Component):
         """Modify attributes of a repository."""
         if is_default(reponame):
             reponame = ''
+        new_reponame = changes.get('name', reponame)
+        if is_default(new_reponame):
+            new_reponame = ''
         rm = RepositoryManager(self.env)
         with self.env.db_transaction as db:
             id = rm.get_repository_id(reponame)
+            if reponame != new_reponame:
+                if db("""SELECT id FROM repository WHERE name='name' AND
+                         value=%s""", (new_reponame,)):
+                    raise TracError(_('The repository "%(name)s" already '
+                                      'exists.',
+                                      name=new_reponame or '(default)'))
             for (k, v) in changes.iteritems():
                 if k not in self.repository_attrs:
                     continue
@@ -997,6 +1006,23 @@ class Node(object):
         The returned object must support a `read([len])` method.
         """
         raise NotImplementedError
+
+    def get_processed_content(self, keyword_substitution=True, eol_hint=None):
+        """Return a stream for reading the content of the node, with some
+        standard processing applied.
+
+        :param keyword_substitution: if `True`, meta-data keywords
+            present in the content like ``$Rev$`` are substituted
+            (which keyword are substituted and how they are
+            substituted is backend specific)
+
+        :param eol_hint: which style of line ending is expected if
+            `None` was explicitly specified for the file itself in
+            the version control backend (for example in Subversion,
+            if it was set to ``'native'``).  It can be `None`,
+            ``'LF'``, ``'CR'`` or ``'CRLF'``.
+        """
+        return self.get_content()
 
     def get_entries(self):
         """Generator that yields the immediate child entries of a directory.

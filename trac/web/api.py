@@ -243,6 +243,10 @@ class RequestDone(Exception):
     """Marker exception that indicates whether request processing has completed
     and a response was sent.
     """
+    iterable = None
+
+    def __init__(self, iterable=None):
+        self.iterable = iterable
 
 
 class Cookie(SimpleCookie):
@@ -407,11 +411,12 @@ class Request(object):
         `value` must either be an `unicode` string or can be converted to one
         (e.g. numbers, ...)
         """
-        if name.lower() == 'content-type':
+        lower_name = name.lower()
+        if lower_name == 'content-type':
             ctpos = value.find('charset=')
             if ctpos >= 0:
                 self._outcharset = value[ctpos + 8:].strip()
-        elif name.lower() == 'content-length':
+        elif lower_name == 'content-length':
             self._content_length = int(value)
         self._outheaders.append((name, unicode(value).encode('utf-8')))
 
@@ -603,25 +608,29 @@ class Request(object):
     def write(self, data):
         """Write the given data to the response body.
 
-        `data` *must* be a `str` string, encoded with the charset
-        which has been specified in the ''Content-Type'' header
-        or 'utf-8' otherwise.
+        *data* **must** be a `str` string, encoded with the charset
+        which has been specified in the ``'Content-Type'`` header
+        or UTF-8 otherwise.
 
-        Note that the ''Content-Length'' header must have been specified.
-        Its value either corresponds to the length of `data`, or, if there
-        are multiple calls to `write`, to the cumulated length of the `data`
-        arguments.
+        Note that when the ``'Content-Length'`` header is specified,
+        its value either corresponds to the length of *data*, or, if
+        there are multiple calls to `write`, to the cumulated length
+        of the *data* arguments.
         """
         if not self._write:
             self.end_headers()
-        if not hasattr(self, '_content_length'):
-            raise RuntimeError("No Content-Length header set")
         if isinstance(data, unicode):
             raise ValueError("Can't send unicode content")
         try:
             self._write(data)
         except (IOError, socket.error), e:
             if e.args[0] in (errno.EPIPE, errno.ECONNRESET, 10053, 10054):
+                raise RequestDone
+            # Note that mod_wsgi raises an IOError with only a message
+            # if the client disconnects
+            if 'mod_wsgi.version' in self.environ and \
+               e.args[0] in ('failed to write data',
+                             'client connection closed'):
                 raise RequestDone
             raise
 
